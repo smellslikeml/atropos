@@ -75,7 +75,26 @@ jobs:
             sha=$(echo -n "$ANTHROPIC_API_KEY" | sha256sum | cut -c1-8)
             echo "DIAG: ANTHROPIC_API_KEY length=$len  sha8=$sha"
           fi
+          if [ -z "$ANTHROPIC_AUTH_TOKEN" ]; then
+            echo "DIAG: ANTHROPIC_AUTH_TOKEN is EMPTY"
+          else
+            tlen=${#ANTHROPIC_AUTH_TOKEN}
+            tsha=$(echo -n "$ANTHROPIC_AUTH_TOKEN" | sha256sum | cut -c1-8)
+            echo "DIAG: ANTHROPIC_AUTH_TOKEN length=$tlen  sha8=$tsha"
+          fi
           echo "DIAG: backend input=${{ inputs.backend }}"
+          # Probe z.ai directly with whichever credential is set, to
+          # isolate env-propagation vs Claude-Code handling.
+          if [ "${{ inputs.backend }}" = "glm" ] && [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
+            code=$(curl -sS -o /tmp/zai_probe.json -w "%{http_code}" \
+              -X POST "https://api.z.ai/api/anthropic/v1/messages" \
+              -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "content-type: application/json" \
+              --data '{"model":"glm-4.6","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}')
+            echo "DIAG: z.ai direct probe (Bearer) → HTTP $code"
+            echo "DIAG: response head: $(head -c 100 /tmp/zai_probe.json)"
+          fi
       # Mint a remyx[bot] token from Remyx so the PR / Issue is authored by
       # the Remyx GitHub App (not github-actions[bot]). The App private key
       # stays on Remyx's side; this uses the REMYX_API_KEY already in secrets.
