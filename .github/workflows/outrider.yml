@@ -96,7 +96,38 @@ jobs:
           ls -la /tmp/cocoindex-code/.claude-plugin/ 2>&1 | head -20
           echo "=== plugin manifest contents ==="
           cat /tmp/cocoindex-code/.claude-plugin/*.json 2>&1 | head -50 || true
-      - uses: remyxai/outrider@v1
+      # REMYX-168 validation: write an ENVIRONMENTS.md describing the
+      # cocoindex-code skill installed above, so Outrider (running from
+      # the feat/environments-md branch) picks it up and injects it
+      # into the agent's brief. Content: OKF frontmatter + markdown body.
+      - name: Write ENVIRONMENTS.md for Outrider
+        run: |
+          cat > "$GITHUB_WORKSPACE/ENVIRONMENTS.md" <<'EOF'
+          ---
+          type: Workflow Environment
+          title: cocoindex-code AST search available
+          description: cocoindex-code AST-based semantic code search is pre-installed as a Claude Code skill.
+          resource: https://github.com/smellslikeml/atropos/blob/experiment/cocoindex-river-pin/.github/workflows/outrider.yml
+          tags: [outrider, environment, cocoindex-code, ast-search]
+          timestamp: 2026-07-01T02:30:00Z
+          ---
+
+          # Environment: cocoindex-code AST search
+
+          ## Available tools
+
+          - **\`ccc\` CLI**: AST-based semantic code search across the cloned repo. Prefer over reading entire large files when locating functions, classes, or specific code patterns. Multi-language (tree-sitter based).
+
+          ## Suggested use during implementation
+
+          - For "find the function that does X" queries, invoke the semantic-search skill rather than Read/Grep on speculation.
+          - For files >500 LOC where you only need one function, prefer AST search + targeted Read over reading the whole file.
+          - The skill also supports incremental re-indexing after your edits.
+          EOF
+          echo "=== ENVIRONMENTS.md written to workspace ==="
+          ls -la "$GITHUB_WORKSPACE/ENVIRONMENTS.md"
+          head -20 "$GITHUB_WORKSPACE/ENVIRONMENTS.md"
+      - uses: remyxai/outrider@feat/environments-md
         with:
           interest-id: f17d1f4c-a9cd-4c8f-bd57-8b076ff6f2ed
           # Minimum days between recommendation PRs on this repo. '0' lets
