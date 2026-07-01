@@ -127,7 +127,7 @@ jobs:
           echo "=== ENVIRONMENTS.md written to workspace ==="
           ls -la "$GITHUB_WORKSPACE/ENVIRONMENTS.md"
           head -20 "$GITHUB_WORKSPACE/ENVIRONMENTS.md"
-      - uses: remyxai/outrider@feat/spillover-threshold
+      - uses: remyxai/outrider@v1
         with:
           interest-id: f17d1f4c-a9cd-4c8f-bd57-8b076ff6f2ed
           # Minimum days between recommendation PRs on this repo. '0' lets
