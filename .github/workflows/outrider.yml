@@ -70,7 +70,7 @@ jobs:
           if [ -n "$MODEL_INPUT" ]; then
             echo "ANTHROPIC_MODEL=$MODEL_INPUT" >> "$GITHUB_ENV"
           fi
-      - uses: remyxai/outrider@feat/mode-branch  # TEST: publish=branch mode
+      - uses: remyxai/outrider@v1
         with:
           interest-id: f17d1f4c-a9cd-4c8f-bd57-8b076ff6f2ed
           # Minimum days between recommendation PRs on this repo. '0' lets
@@ -84,7 +84,6 @@ jobs:
           # scheduled runs — the action uses its own defaults.
           search-method: ${{ inputs.search-method }}
           pin-arxiv: ${{ inputs.pin-arxiv }}
-          publish: 'branch'  # TEST: skip PR/Issue creation
           claude-timeout: ${{ inputs.claude-timeout }}
           # Maps provider name → base URL. Adding more providers here
           # extends the table (Bedrock / Vertex / on-prem); leave
