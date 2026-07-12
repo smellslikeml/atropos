@@ -39,13 +39,13 @@ on:
         required: false
         default: ''
       start-from-ref:
+        description: 'Optional branch/tag/SHA to start the coding session from.'
+        required: false
+        default: ''
       staged-synthesis:
         description: 'Opt-in two-stage: research phase produces web_findings.json before the coding session.'
         required: false
         default: 'false'
-        description: 'Optional branch/tag/SHA to start the coding session from (REMYX-219 refinement mode).'
-        required: false
-        default: ''
       claude-timeout:
         description: 'Wall-clock seconds for the Claude Code agent calls (preflight + implementation). Raise for very large monorepos; lower to cap cost.'
         required: false
