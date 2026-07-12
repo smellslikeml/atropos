@@ -24,12 +24,20 @@ Usage:
 """
 
 from .combined_reward import CombinedReward
+from .metacognitive_accuracy import MetacognitiveAccuracyReward
 from .metacognitive_reward import MetacognitiveReward
 from .registry import registry
 from .reward_function import RewardFunction
 
-# Importing metacognitive_reward above also eagerly registers the
-# "metacognitive" reward (via @registry.register), so it is resolvable by
-# registry.create("metacognitive") from DatasetEnv.score without relying on
-# the lazy file loader.
-__all__ = ["RewardFunction", "registry", "CombinedReward", "MetacognitiveReward"]
+# Importing the metacognitive modules above also eagerly registers the
+# "metacognitive" (first-order faithfulness) and "metacognitiveaccuracy"
+# (second-order self-assessment / Z_g) rewards via @registry.register, so both
+# are resolvable by registry.create(...) from DatasetEnv.score without relying
+# on the lazy file loader.
+__all__ = [
+    "RewardFunction",
+    "registry",
+    "CombinedReward",
+    "MetacognitiveReward",
+    "MetacognitiveAccuracyReward",
+]
