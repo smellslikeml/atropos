@@ -39,6 +39,10 @@ on:
         required: false
         default: ''
       start-from-ref:
+      staged-synthesis:
+        description: 'Opt-in two-stage: research phase produces web_findings.json before the coding session.'
+        required: false
+        default: 'false'
         description: 'Optional branch/tag/SHA to start the coding session from (REMYX-219 refinement mode).'
         required: false
         default: ''
@@ -82,7 +86,7 @@ jobs:
           if [ -n "$MODEL_INPUT" ]; then
             echo "ANTHROPIC_MODEL=$MODEL_INPUT" >> "$GITHUB_ENV"
           fi
-      - uses: remyxai/outrider@v1
+      - uses: remyxai/outrider@feat/research-context-enrichment
         with:
           interest-id: f17d1f4c-a9cd-4c8f-bd57-8b076ff6f2ed
           # Minimum days between recommendation PRs on this repo. '0' lets
@@ -99,6 +103,7 @@ jobs:
           publish: ${{ inputs.publish }}
           lead-content: ${{ inputs.lead-content }}
           start-from-ref: ${{ inputs.start-from-ref }}
+          staged-synthesis: ${{ inputs.staged-synthesis }}
           claude-timeout: ${{ inputs.claude-timeout }}
           # Maps provider name → base URL. Adding more providers here
           # extends the table (Bedrock / Vertex / on-prem); leave
