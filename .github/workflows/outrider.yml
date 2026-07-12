@@ -38,6 +38,10 @@ on:
         description: 'Optional URL to a spec/gist that overrides suggested_experiment.'
         required: false
         default: ''
+      start-from-ref:
+        description: 'Optional branch/tag/SHA to start the coding session from (REMYX-219 refinement mode).'
+        required: false
+        default: ''
       claude-timeout:
         description: 'Wall-clock seconds for the Claude Code agent calls (preflight + implementation). Raise for very large monorepos; lower to cap cost.'
         required: false
@@ -94,6 +98,7 @@ jobs:
           pin-arxiv: ${{ inputs.pin-arxiv }}
           publish: ${{ inputs.publish }}
           lead-content: ${{ inputs.lead-content }}
+          start-from-ref: ${{ inputs.start-from-ref }}
           claude-timeout: ${{ inputs.claude-timeout }}
           # Maps provider name → base URL. Adding more providers here
           # extends the table (Bedrock / Vertex / on-prem); leave
