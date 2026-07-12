@@ -24,7 +24,12 @@ Usage:
 """
 
 from .combined_reward import CombinedReward
+from .metacognitive_reward import MetacognitiveReward
 from .registry import registry
 from .reward_function import RewardFunction
 
-__all__ = ["RewardFunction", "registry", "CombinedReward"]
+# Importing metacognitive_reward above also eagerly registers the
+# "metacognitive" reward (via @registry.register), so it is resolvable by
+# registry.create("metacognitive") from DatasetEnv.score without relying on
+# the lazy file loader.
+__all__ = ["RewardFunction", "registry", "CombinedReward", "MetacognitiveReward"]
