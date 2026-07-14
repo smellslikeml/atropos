@@ -25,6 +25,7 @@ Usage:
 
 from .combined_reward import CombinedReward
 from .registry import registry
+from .reward_floor import RewardFloor
 from .reward_function import RewardFunction
 
-__all__ = ["RewardFunction", "registry", "CombinedReward"]
+__all__ = ["RewardFunction", "registry", "CombinedReward", "RewardFloor"]
