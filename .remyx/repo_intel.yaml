@@ -28,18 +28,20 @@ observed_landing_zones:
     call_site_specifics: ''
     branch: escaping-the-self-confirmation-trap-an-execute-distill-verif
     timestamp: '2026-07-14T15:57:34Z'
+  last_observed: '2026-07-14T15:57:34Z'
+- path: environments/dataset_environment/
+  shape_tags:
+  - library-shape-public-api
+  - registry-add
+  confirmed_by:
   - arxiv: 2606.27291v1
-    mode: ''
-    call_site_specifics: ''
-    branch: designing-reward-signals-for-portable-query-generation-a-cas
-    timestamp: '2026-07-14T16:38:18Z'
-  last_observed: '2026-07-14T16:38:18Z'
-rejected_shapes:
-- shape_tag: null
-  reason_code: null
-  reason_summary: ''
-  observed:
-  - arxiv: 2606.25800v1
-    timestamp: '2026-07-14T17:28:58Z'
+    mode: Mode 2 (adapted port)
+    call_site_specifics: CombinedReward.compute (existing, used by environments/dataset_environment/dataset_env.py
+      and others) now applies the floor override when the floor config field is set;
+      FloorGuardedReward is registere
+    pr: 15
+    timestamp: '2026-07-14T18:07:11Z'
+  last_observed: '2026-07-14T18:07:11Z'
+rejected_shapes: []
 coordination_signals: []
-last_updated: '2026-07-14T17:28:58Z'
+last_updated: '2026-07-14T18:07:11Z'
