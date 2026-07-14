@@ -13,6 +13,16 @@ observed_landing_zones:
     branch: road-vla-robust-online-adaptation-via-self-distillation-for-
     timestamp: '2026-07-14T14:39:17Z'
   last_observed: '2026-07-14T14:39:17Z'
+- path: atroposlib/envs/reward_fns/
+  shape_tags:
+  - unclassified
+  confirmed_by:
+  - arxiv: 2606.17680v1
+    mode: ''
+    call_site_specifics: ''
+    branch: envrl-learn-from-environment-dynamics-in-agentic-reinforceme
+    timestamp: '2026-07-14T15:16:48Z'
+  last_observed: '2026-07-14T15:16:48Z'
 rejected_shapes: []
 coordination_signals: []
-last_updated: '2026-07-14T14:39:17Z'
+last_updated: '2026-07-14T15:16:48Z'
