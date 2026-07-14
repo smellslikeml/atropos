@@ -17,19 +17,18 @@ import logging
 from abc import ABC
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import yaml
 from pydantic import Field
 from pydantic_cli import Cmd
 from rich import print as rprint
 
-from ..utils.cli import (
-    extract_namespace,
-    get_double_dash_flags,
-    get_prefixed_pydantic_model,
-    merge_dicts,
-)
+from ..utils.cli import (extract_namespace, get_double_dash_flags,
+                         get_prefixed_pydantic_model, merge_dicts)
 from .base import BaseEnv, BaseEnvConfig, ScoredDataGroup
 from .constants import ENV_NAMESPACE, NAMESPACE_SEP, OPENAI_NAMESPACE
+from .dense_signal_evaluator import (DenseSignalEvaluator,
+                                     SignalEvaluationResult)
 from .server_handling.openai_server import resolve_openai_configs
 from .server_handling.server_baseline import APIServerConfig, ServerBaseline
 from .server_handling.server_manager import ServerManager, ServerManagerConfig
@@ -342,9 +341,9 @@ class TeacherDistillationEnv(BaseEnv, ABC):
             )
         except Exception as exc:
             raise ValueError(
-                "Cross-tokenizer distillation is not supported in this PR, and the "
-                f"teacher tokenizer for '{teacher_tokenizer_name}' could not be loaded to "
-                f"verify compatibility: {exc}"
+                "Cross-tokenizer distillation is not supported in this PR, "
+                f"and the teacher tokenizer for '{teacher_tokenizer_name}' could "
+                f"not be loaded to verify compatibility: {exc}"
             ) from exc
 
         student_vocab = self.tokenizer.get_vocab()
@@ -352,8 +351,9 @@ class TeacherDistillationEnv(BaseEnv, ABC):
         if student_vocab != teacher_vocab:
             raise ValueError(
                 "Cross-tokenizer distillation is not supported in this PR. "
-                f"Student tokenizer '{student_tok_name or type(self.tokenizer).__name__}' "
-                f"and teacher tokenizer '{teacher_tokenizer_name}' do not match."
+                f"Student tokenizer "
+                f"'{student_tok_name or type(self.tokenizer).__name__}' and "
+                f"teacher tokenizer '{teacher_tokenizer_name}' do not match."
             )
 
     async def _fetch_teacher_for_sequence(
@@ -457,3 +457,90 @@ class TeacherDistillationEnv(BaseEnv, ABC):
             do_send_to_api=do_send_to_api,
             abort_on_any_max_length_exceeded=abort_on_any_max_length_exceeded,
         )
+
+    # ------------------------------------------------------------------
+    # QVal: Dense signal evaluation
+    # ------------------------------------------------------------------
+
+    def evaluate_teacher_signal_quality(
+        self,
+        groups: List[ScoredDataGroup],
+        gamma: float = 1.0,
+        min_samples: int = 10,
+        signal_name: str = "teacher_logprobs",
+    ) -> SignalEvaluationResult:
+        """
+        Evaluate teacher distillation signal quality using QVal methodology.
+
+        This method implements QVal-inspired evaluation by measuring the correlation
+        between teacher-provided signals (logprobs) and outcome rewards. This provides
+        a training-free assessment of whether the teacher's distillation signal
+        actually correlates with good outcomes.
+
+        Args:
+            groups: List of scored data groups with teacher distillation data
+            gamma: Discount factor for computing reference values from rewards
+            min_samples: Minimum samples required for evaluation
+            signal_name: Name identifier for this evaluation
+
+        Returns:
+            SignalEvaluationResult with Q-alignment metrics
+
+        Note:
+            This is a training-free evaluation. It does not require running the
+            student model or computing gradients. It simply measures whether the
+            teacher's signal orders actions similarly to how outcomes would.
+        """
+        if not groups:
+            raise ValueError("No groups provided for evaluation")
+
+        # Extract teacher logprobs and outcome rewards from groups
+        teacher_logprobs: List[List[List[float]]] = []
+        outcome_rewards: List[float] = []
+
+        for group in groups:
+            if group is None:
+                continue
+
+            distill_logprobs = group.get("distill_logprobs")
+            scores = group.get("scores", [])
+
+            if distill_logprobs is None or not scores:
+                continue
+
+            # For each sequence in the group, extract logprobs
+            teacher_logprobs.extend(distill_logprobs)
+
+            # Use mean score as the outcome reward for each sequence
+            # (This assumes sequences in the group share similar outcomes)
+            group_mean_score = float(np.mean(scores)) if scores else 0.0
+            outcome_rewards.extend([group_mean_score] * len(distill_logprobs))
+
+        if len(teacher_logprobs) < min_samples:
+            raise ValueError(
+                f"Insufficient sequences for signal evaluation: "
+                f"{len(teacher_logprobs)} < {min_samples}. "
+                f"Need more groups with teacher distillation data."
+            )
+
+        # Create evaluator and compute Q-alignment
+        evaluator = DenseSignalEvaluator(min_samples=min_samples)
+
+        try:
+            result = evaluator.evaluate_teacher_logprobs(
+                teacher_logprobs=teacher_logprobs,
+                outcome_rewards=outcome_rewards,
+                signal_name=signal_name,
+            )
+
+            logger.info(
+                f"Teacher signal Q-alignment evaluation complete: "
+                f"Spearman ρ={result.spearman_rho:.4f}, "
+                f"Kendall τ={result.kendall_tau:.4f}"
+            )
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to evaluate teacher signal quality: {e}")
+            raise
