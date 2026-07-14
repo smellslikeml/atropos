@@ -1,10 +1,15 @@
 name: Outrider
 
 on:
-  # Continuous-mode cron. Fires every 15 min; concurrency group serializes
-  # so only one Outrider dispatch runs at a time per fork.
-  schedule:
-    - cron: '*/15 * * * *'
+  # Continuous-mode cron paused — another machine is running Outrider on
+  # this same fork, and the doubled dispatch rate exhausted z.ai's weekly
+  # quota (see run 29351541699: 429 "Weekly/Monthly Limit Exhausted, reset
+  # 2026-07-15 23:57:54"). Re-enable after quota resets, or coordinate the
+  # two machines to disable one side. workflow_dispatch remains available
+  # so provider=anthropic runs (Opus refinements) still work — those don't
+  # touch the z.ai quota.
+  # schedule:
+  #   - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       provider:
