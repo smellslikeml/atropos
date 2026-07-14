@@ -287,34 +287,41 @@ class RewardFloor(RewardFunction):
         self.min_completion_words = min_completion_words
         self.custom_detectors = custom_detectors or {}
 
-    def compute(self, completions: List[Any], **kwargs) -> List[float]:
+    def detect(self, completions: List[Any], **kwargs) -> List[bool]:
         """
-        Compute reward floor values for completions.
+        Detect degenerate reward-hacking behavior in each completion.
+
+        This is the deterministic, rule-based core of the reward floor. It
+        returns a boolean mask (one entry per completion) so downstream
+        composition can *clamp* rewards on a hard override rather than folding
+        the floor in additively. See ``FloorGuardedReward`` for that wiring.
 
         Args:
             completions: List of completions to evaluate
             **kwargs: Additional context including:
-                      - reference: Reference answers for verbatim check
+                      - reference / solution: reference text for verbatim check
                       - prompt: Prompt text for verbatim check
-                      - solution: Ground truth solutions
 
         Returns:
-            List of reward values. Degenerate completions receive floor_value
-            (or penalty_value if set), others receive 1.0 (passing the floor).
+            List of booleans, True where the completion is degenerate.
         """
         # Extract context for degeneracy detection
         reference = kwargs.get("reference") or kwargs.get("solution")
         prompt = kwargs.get("prompt")
 
         # Handle batch vs single reference
-        if reference and isinstance(reference, list) and len(reference) == len(completions):
+        if (
+            reference
+            and isinstance(reference, list)
+            and len(reference) == len(completions)
+        ):
             references = reference
         elif reference:
             references = [reference] * len(completions)
         else:
             references = [None] * len(completions)
 
-        rewards = []
+        flags = []
         for i, completion in enumerate(completions):
             try:
                 content = self.get_content(completion)
@@ -322,7 +329,6 @@ class RewardFloor(RewardFunction):
 
                 # Check if completion passes all enabled rules
                 is_degenerate = False
-                violated_rule = None
 
                 # Rule: Verbatim copying
                 if "verbatim_copy" in self.rules:
@@ -334,7 +340,6 @@ class RewardFloor(RewardFunction):
                     )
                     if copy_ratio >= self.verbatim_threshold:
                         is_degenerate = True
-                        violated_rule = f"verbatim_copy({copy_ratio:.2f})"
                         logger.info(
                             f"Reward floor triggered: verbatim copying "
                             f"(ratio={copy_ratio:.2f} >= {self.verbatim_threshold})"
@@ -348,9 +353,8 @@ class RewardFloor(RewardFunction):
                         min_words=self.min_completion_words,
                     ):
                         is_degenerate = True
-                        violated_rule = "empty_minimal"
                         logger.info(
-                            f"Reward floor triggered: empty or minimal completion"
+                            "Reward floor triggered: empty or minimal completion"
                         )
 
                 # Rule: Excessive repetition
@@ -360,7 +364,6 @@ class RewardFloor(RewardFunction):
                     )
                     if rep_ratio >= self.repetition_threshold:
                         is_degenerate = True
-                        violated_rule = f"repetition({rep_ratio:.2f})"
                         logger.info(
                             f"Reward floor triggered: excessive repetition "
                             f"(ratio={rep_ratio:.2f} >= {self.repetition_threshold})"
@@ -373,7 +376,6 @@ class RewardFloor(RewardFunction):
                     )
                     if template_score > 0.7:  # High exploitation
                         is_degenerate = True
-                        violated_rule = f"template({template_score:.2f})"
                         logger.info(
                             f"Reward floor triggered: template exploitation "
                             f"(score={template_score:.2f})"
@@ -385,9 +387,9 @@ class RewardFloor(RewardFunction):
                         try:
                             if detector_fn(content, ref_text):
                                 is_degenerate = True
-                                violated_rule = f"custom:{detector_name}"
                                 logger.info(
-                                    f"Reward floor triggered: custom detector '{detector_name}'"
+                                    f"Reward floor triggered: custom detector "
+                                    f"'{detector_name}'"
                                 )
                                 break
                         except Exception as e:
@@ -395,23 +397,37 @@ class RewardFloor(RewardFunction):
                                 f"Custom detector '{detector_name}' failed: {e}"
                             )
 
-                # Apply floor or penalty for degenerate completions
-                if is_degenerate:
-                    # If penalty_value is set, return that (typically negative)
-                    # Otherwise return floor_value (typically low positive)
-                    reward = self.penalty_value if self.penalty_value != 0 else self.floor_value
-                    rewards.append(reward)
-                else:
-                    # Non-degenerate: pass through (returns 1.0, gets scaled by weight)
-                    rewards.append(1.0)
+                flags.append(is_degenerate)
 
             except Exception as e:
-                logger.error(f"Error in reward floor computation: {e}")
+                logger.error(f"Error in reward floor detection: {e}")
                 logger.exception(e)
-                # On error, apply conservative floor
-                rewards.append(self.floor_value)
+                # On error, conservatively treat the completion as degenerate
+                flags.append(True)
 
-        return rewards
+        return flags
+
+    def compute(self, completions: List[Any], **kwargs) -> List[float]:
+        """
+        Compute reward floor values for completions.
+
+        Args:
+            completions: List of completions to evaluate
+            **kwargs: Additional context (reference / solution / prompt) used
+                      by :meth:`detect`.
+
+        Returns:
+            List of reward values. Degenerate completions receive
+            ``penalty_value`` (if set) or ``floor_value``; others receive 1.0
+            (passing the floor, then scaled by weight in ``__call__``).
+        """
+        degenerate_value = (
+            self.penalty_value if self.penalty_value != 0 else self.floor_value
+        )
+        return [
+            degenerate_value if flag else 1.0
+            for flag in self.detect(completions, **kwargs)
+        ]
 
 
 # Legacy function for backward compatibility
