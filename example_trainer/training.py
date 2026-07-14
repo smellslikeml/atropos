@@ -5,8 +5,12 @@ Contains loss computation, training step logic, and metric logging.
 
 Includes logprob alignment tracking to verify that training logprobs match
 inference logprobs at initialization (validates shared_vllm mode is working).
+
+Supports RSI (Relative Surprisal Index) token selection for improved
+RLVR training efficiency.
 """
 
+import logging
 import random
 import string
 import time
@@ -16,7 +20,11 @@ import torch
 import torch.nn.functional as F
 import wandb
 
+from atroposlib.utils.token_selection import registry as token_selection_registry
+
 from .config import TrainingConfig
+
+logger = logging.getLogger(__name__)
 
 # Global storage for logprob alignment stats
 _logprob_alignment_stats: Dict[str, float] = {}
@@ -70,6 +78,7 @@ def compute_grpo_loss(
     gradient_accumulation_steps: int,
     inference_logprobs: Optional[torch.Tensor] = None,
     clip_eps: float = 0.2,
+    token_selector_config: Optional[Dict] = None,
 ) -> Tuple[torch.Tensor, dict]:
     """
     Compute GRPO (Group Relative Policy Optimization) loss for a single micro-batch.
@@ -77,6 +86,7 @@ def compute_grpo_loss(
     This implements GRPO/PPO-style clipped ratio training with:
     - Importance sampling ratio from current logprobs vs rollout inference_logprobs
     - PPO-style clipping to prevent large updates
+    - Optional RSI token selection for improved RLVR efficiency
 
     The loss encourages the model to:
     - Increase probability for tokens with positive advantages
@@ -89,8 +99,11 @@ def compute_grpo_loss(
         advantages: Advantage values [batch, 1]
         temperatures: Temperature values [batch, 1, 1]
         gradient_accumulation_steps: Number of accumulation steps (for scaling)
-        inference_logprobs: Rollout logprobs from inference, aligned with labels [batch, seq_len]
+        inference_logprobs: Rollout logprobs from inference, aligned with labels
+            [batch, seq_len]
         clip_eps: PPO clipping epsilon. Clips ratio to [1-eps, 1+eps]
+        token_selector_config: Optional config for token selection
+            (e.g., {"type": "rsi", "rsi_min": 0.1, "rsi_max": 3.0})
 
     Returns:
         Tuple of (loss tensor, metrics dict)
@@ -116,6 +129,27 @@ def compute_grpo_loss(
     mask = (labels != -100).float()
     mask_sum = mask.sum(dim=-1).clamp_min(1e-8)
 
+    # === RSI Token Selection ===
+    rsi_metrics = {}
+    if token_selector_config is not None:
+        try:
+            token_selector = token_selection_registry.create(
+                token_selector_config
+            )
+            rsi_mask, rsi_metrics = token_selector.compute_mask(
+                logits, labels, temperatures
+            )
+            # Combine RSI mask with the original mask
+            mask = mask * rsi_mask
+            mask_sum = mask.sum(dim=-1).clamp_min(1e-8)
+            kept = rsi_metrics.get("rsi/kept_tokens", 0)
+            valid = rsi_metrics.get("rsi/valid_tokens", 0)
+            logger.debug(f"RSI: kept {kept}/{valid} tokens")
+        except Exception as e:
+            logger.warning(
+                f"RSI token selection failed: {e}. Using standard mask."
+            )
+
     # Expand advantages to match token shape [batch, 1] -> [batch, seq_len]
     adv_expanded = advantages.expand_as(logp_per_token).to(logp_per_token.device)
 
@@ -132,7 +166,8 @@ def compute_grpo_loss(
             logp_per_token.device, logp_per_token.dtype
         )
 
-        # NOTE: inference_logprobs uses 1.0 for masked (prompt) positions, actual negative values for generated
+        # NOTE: inference_logprobs uses 1.0 for masked (prompt) positions,
+        # actual negative values for generated
         with torch.no_grad():
             # Only look at generated positions (where mask == 1)
             ref_at_generated = (ref_logprobs * mask).sum() / mask.sum()
@@ -160,7 +195,8 @@ def compute_grpo_loss(
                 )
             elif abs(ref_at_generated - train_at_generated) > 2.0:
                 print(
-                    f"    [DEBUG] Logprob gap: ref={ref_at_generated:.3f}, train={train_at_generated:.3f}"
+                    f"    [DEBUG] Logprob gap: ref={ref_at_generated:.3f}, "
+                    f"train={train_at_generated:.3f}"
                 )
 
         # Compute importance ratio from current training logprobs and rollout inference_logprobs.
@@ -255,6 +291,10 @@ def compute_grpo_loss(
         "logprob_diff_max": logprob_diff_max,
     }
 
+    # Add RSI metrics if available
+    if rsi_metrics:
+        metrics.update(rsi_metrics)
+
     return total_loss, metrics
 
 
@@ -308,6 +348,7 @@ def run_training_step(
 
     # Get GRPO hyperparameters from config
     clip_eps = getattr(config, "clip_eps", 0.2)
+    token_selector_config = getattr(config, "token_selection_config", None)
 
     # Apply linear warmup to optimizer LR for early-step stability.
     warmup_steps = max(0, int(getattr(config, "warmup_steps", 0)))
@@ -345,6 +386,7 @@ def run_training_step(
             config.gradient_accumulation_steps,
             inference_logprobs=inf_logprobs,
             clip_eps=clip_eps,
+            token_selector_config=token_selector_config,
         )
 
         loss.backward()

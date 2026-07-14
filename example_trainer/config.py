@@ -69,6 +69,15 @@ class TrainingConfig(BaseModel):
             "Prevents large policy updates that could destabilize training."
         ),
     )
+    token_selection_config: Optional[dict] = Field(
+        None,
+        description=(
+            "Optional token selection configuration for improved RLVR training. "
+            "Example: {'type': 'rsi', 'rsi_min': 0.1, 'rsi_max': 3.0} "
+            "Enables RSI (Relative Surprisal Index) token selection. "
+            "None means no token selection is applied."
+        ),
+    )
     # === Device & Storage ===
     device: str = Field(
         "cuda" if torch.cuda.is_available() else "cpu", description="Device to train on"
@@ -114,17 +123,20 @@ class TrainingConfig(BaseModel):
     wandb_group: Optional[str] = Field(None, description="Wandb group name")
 
     # === Training Mode Configuration ===
-    weight_bridge_mode: Literal["shared_vllm", "lora_only", "lora_restart", "none"] = (
-        Field(
-            "none",
-            description=(
-                "How to synchronize weights with inference server. "
-                "'shared_vllm': attach to vLLM's shared memory tensors and update in-place. "
-                "'lora_only': keep base model frozen, train/swap LoRA adapters via HTTP (slow, needs --enforce-eager). "
-                "'lora_restart': LoRA training with vLLM restarts (fast, CUDA graphs enabled). "
-                "'none': legacy mode, restart vLLM with new checkpoint files."
-            ),
-        )
+    weight_bridge_mode: Literal[
+        "shared_vllm", "lora_only", "lora_restart", "none"
+    ] = Field(
+        "none",
+        description=(
+            "How to synchronize weights with inference server. "
+            "'shared_vllm': attach to vLLM's shared memory tensors and "
+            "update in-place. "
+            "'lora_only': keep base model frozen, train/swap LoRA adapters "
+            "via HTTP (slow, needs --enforce-eager). "
+            "'lora_restart': LoRA training with vLLM restarts "
+            "(fast, CUDA graphs enabled). "
+            "'none': legacy mode, restart vLLM with new checkpoint files."
+        ),
     )
     train_layer_indices: Optional[List[int]] = Field(
         None,
