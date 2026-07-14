@@ -50,6 +50,20 @@ from .server_handling.server_manager import (
     ServerManagerConfig,
 )
 
+# Optional environment engineer support
+try:
+    from .environment_engineer import (
+        BaseEnvironmentEngineer,
+        ConfigChangeType,
+        EngineerAnalysis,
+    )
+    _ENV_ENGINEER_AVAILABLE = True
+except ImportError:
+    _ENV_ENGINEER_AVAILABLE = False
+
+    class ConfigChangeType:  # type: ignore
+        pass
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
@@ -427,6 +441,113 @@ class BaseEnv(ABC):
             self.eval_workers.add(worker)
             worker.add_done_callback(self.eval_workers.discard)
         raise NotImplementedError("Evaluate method must be implemented in subclass ")
+
+    async def run_environment_engineer(
+        self,
+        failure_cases: List,
+        current_configs: Dict,
+        eval_metrics: Dict,
+        engineer: Optional["BaseEnvironmentEngineer"] = None,
+    ) -> Optional["EngineerAnalysis"]:
+        """
+        Run the environment engineer to analyze failures and propose config changes.
+
+        This method implements the LLM-as-Environment-Engineer framework from
+        https://arxiv.org/abs/2606.17682v1, where the current policy model analyzes
+        failure trajectories and proposes modifications to the next-stage training
+        environment configuration.
+
+        Args:
+            failure_cases: List of failure cases from evaluation (as FailureCase or dict)
+            current_configs: Current environment configuration (as dict mapping names to EnvironmentConfig or dict)
+            eval_metrics: Overall evaluation metrics
+            engineer: Optional engineer instance; if None and available, creates from config
+
+        Returns:
+            EngineerAnalysis with proposals, or None if engineer not available
+        """
+        if not _ENV_ENGINEER_AVAILABLE:
+            logger.debug(
+                "Environment engineer module not available. "
+                "Install atroposlib with full dependencies to use this feature."
+            )
+            return None
+
+        # Import here to avoid hard dependency if not used
+        from .environment_engineer import (
+            HeuristicEnvironmentEngineer,
+            EnvironmentEngineerConfig,
+            FailureCase,
+            EnvironmentConfig,
+        )
+
+        # Check if enabled
+        engineer_config = getattr(self.config, "environment_engineer", None)
+        if engineer_config is None:
+            logger.debug("Environment engineer not configured in env config.")
+            return None
+
+        if isinstance(engineer_config, dict):
+            engineer_config = EnvironmentEngineerConfig(**engineer_config)
+        elif not isinstance(engineer_config, EnvironmentEngineerConfig):
+            logger.warning(f"Invalid engineer config type: {type(engineer_config)}")
+            return None
+
+        if not engineer_config.enabled:
+            return None
+
+        # Normalize inputs
+        normalized_failures = []
+        for case in failure_cases:
+            if isinstance(case, FailureCase):
+                normalized_failures.append(case)
+            elif isinstance(case, dict):
+                normalized_failures.append(
+                    FailureCase(
+                        item_id=case.get("item_id", "unknown"),
+                        input_text=str(case.get("input", case.get("input_text", ""))),
+                        model_output=str(case.get("output", case.get("model_output", ""))),
+                        expected_output=str(case.get("expected", case.get("expected_output", ""))),
+                        score=float(case.get("score", 0.0)),
+                        failure_reason=str(case.get("reason", case.get("failure_reason", "unknown"))),
+                        metadata=case.get("metadata"),
+                    )
+                )
+
+        normalized_configs = {}
+        for name, config in current_configs.items():
+            if isinstance(config, EnvironmentConfig):
+                normalized_configs[name] = config
+            elif isinstance(config, dict):
+                normalized_configs[name] = EnvironmentConfig(
+                    config_name=name,
+                    current_value=config.get("current_value"),
+                    min_value=config.get("min_value"),
+                    max_value=config.get("max_value"),
+                    description=config.get("description", ""),
+                    change_type=ConfigChangeType(config.get("change_type", "adapter_parameter")),
+                )
+
+        if not normalized_failures:
+            logger.info("No failure cases to analyze.")
+            return None
+
+        # Create engineer if not provided
+        if engineer is None:
+            engineer = HeuristicEnvironmentEngineer(engineer_config)
+
+        # Run analysis
+        logger.info(f"Running environment engineer on {len(normalized_failures)} failure cases...")
+        analysis = await engineer.analyze(
+            normalized_failures,
+            normalized_configs,
+            eval_metrics,
+        )
+
+        # Log summary
+        logger.info(f"Environment engineer analysis complete:\n{analysis.summary}")
+
+        return analysis
 
     def load_checkpoint(self):
         # check if file exists...
