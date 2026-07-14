@@ -92,10 +92,14 @@ jobs:
         with:
           interest-id: f17d1f4c-a9cd-4c8f-bd57-8b076ff6f2ed
           rate-limit-days: '0'
-          # Include common meta-files in the allowlist based on the VQASynth
-          # rotation lesson — coding agents legitimately touch these while
-          # implementing training pipelines and env-dep hooks.
+          # DEPRECATED in v1.7.24 — kept until upstream removes the input; no-op
+          # today. Legacy from before the permissive-default guardrails ship.
           guardrails-allowlist: '.gitignore,.dockerignore,requirements*.txt,setup.py,setup.cfg,pyproject.toml,MANIFEST.in'
+          # Linear connector auth. Enables lead-content=<Linear issue URL> to
+          # resolve to the issue body server-side (via engineOutrider's Linear
+          # connector) before the coding session starts, so refinement passes
+          # get the scoped gap analysis as their SPEC.md instead of the raw URL.
+          linear-api-key: ${{ secrets.LINEAR_API_KEY }}
           search-method: ${{ inputs.search-method || '' }}
           pin-arxiv: ${{ inputs.pin-arxiv || '' }}
           claude-timeout: ${{ inputs.claude-timeout || '900' }}
