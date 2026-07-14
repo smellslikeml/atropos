@@ -27,7 +27,14 @@ observed_landing_zones:
     call_site_specifics: ''
     branch: escaping-the-self-confirmation-trap-an-execute-distill-verif-v2
     timestamp: '2026-07-14T22:44:30Z'
-  last_observed: '2026-07-14T22:44:30Z'
+  - arxiv: 2606.17682v1
+    mode: Mode 2 (adapted port)
+    call_site_specifics: BaseEnv.run_environment_engineer() (async method on abstract
+      base class - reachable from any environment instance; library-shape API for
+      external consumers)
+    branch: from-trainee-to-trainer-llm-designed-training-environment-fo
+    timestamp: '2026-07-14T23:45:09Z'
+  last_observed: '2026-07-14T23:45:09Z'
 - path: atroposlib/utils/
   shape_tags:
   - unclassified
@@ -47,4 +54,4 @@ rejected_shapes:
   - arxiv: 2606.17680v1
     timestamp: '2026-07-14T20:57:47Z'
 coordination_signals: []
-last_updated: '2026-07-14T23:30:37Z'
+last_updated: '2026-07-14T23:45:09Z'
