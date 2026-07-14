@@ -22,7 +22,12 @@ observed_landing_zones:
     call_site_specifics: ''
     branch: envrl-learn-from-environment-dynamics-in-agentic-reinforceme
     timestamp: '2026-07-14T15:16:48Z'
-  last_observed: '2026-07-14T15:16:48Z'
+  - arxiv: 2606.24428v1
+    mode: ''
+    call_site_specifics: ''
+    branch: escaping-the-self-confirmation-trap-an-execute-distill-verif
+    timestamp: '2026-07-14T15:57:34Z'
+  last_observed: '2026-07-14T15:57:34Z'
 rejected_shapes: []
 coordination_signals: []
-last_updated: '2026-07-14T15:16:48Z'
+last_updated: '2026-07-14T15:57:34Z'
