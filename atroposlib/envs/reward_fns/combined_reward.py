@@ -1,8 +1,9 @@
 """Combined reward function that combines multiple reward functions."""
 
 import logging
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
+from .floor_guarded_reward import apply_reward_floor
 from .registry import registry
 from .reward_function import RewardFunction
 
@@ -17,6 +18,8 @@ class CombinedReward(RewardFunction):
         self,
         rewards: List[Union[str, Dict]],
         normalization: str = "none",
+        floor: Optional[Union[str, Dict]] = None,
+        floor_value: float = -1.0,
         weight: float = 1.0,
         **kwargs,
     ):
@@ -29,6 +32,16 @@ class CombinedReward(RewardFunction):
                           - "none": No normalization
                           - "sum": Divide by sum of weights
                           - "minmax": Scale to range [0,1] based on min/max values
+            floor: Optional deterministic reward-floor config (e.g.
+                   ``{"type": "reward_floor", ...}``). When set, the combined
+                   reward is clamped to ``floor_value`` for any completion the
+                   floor flags as degenerate, as an override rather than an
+                   additive penalty. Implements the S_r gating from
+                   "Designing Reward Signals for Portable Query Generation"
+                   (arXiv:2606.27291), which keeps the signal robust to
+                   GRPO-style reward hacking.
+            floor_value: Value assigned to degenerate completions when ``floor``
+                         is set (the paper clamps to -1.0).
             weight: Weight for this combined reward
             **kwargs: Additional parameters
         """
@@ -40,6 +53,10 @@ class CombinedReward(RewardFunction):
         for reward_config in rewards:
             self.reward_functions.append(registry.create(reward_config))
 
+        # Optional deterministic floor applied as an override after combination.
+        self.floor = registry.create(floor) if floor is not None else None
+        self.floor_value = floor_value
+
     @property
     def name(self) -> str:
         """Get a descriptive name for this combined reward"""
@@ -50,6 +67,8 @@ class CombinedReward(RewardFunction):
         super().set_wandb_logger(logger)
         for reward_fn in self.reward_functions:
             reward_fn.set_wandb_logger(logger)
+        if self.floor is not None:
+            self.floor.set_wandb_logger(logger)
 
     def compute(self, completions: List[Any], **kwargs) -> List[float]:
         """Compute combined rewards by calling all sub-rewards"""
@@ -87,5 +106,14 @@ class CombinedReward(RewardFunction):
                     (r - reward_min) / (reward_max - reward_min)
                     for r in combined_rewards
                 ]
+
+        # Deterministic floor override: clamp degenerate completions after
+        # combination so a high sub-reward cannot rescue a reward-hacking
+        # completion (arXiv:2606.27291).
+        if self.floor is not None:
+            degenerate_mask = self.floor.detect(completions, **kwargs)
+            combined_rewards = apply_reward_floor(
+                combined_rewards, degenerate_mask, self.floor_value
+            )
 
         return combined_rewards
