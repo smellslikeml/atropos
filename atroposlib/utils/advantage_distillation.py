@@ -17,88 +17,111 @@ Reference:
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Sequence
+from typing import List, Optional
 
 import numpy as np
 
+from .advantage_calibration import (
+    DEFAULT_ADVANTAGE_CLIP,
+    calibrate_signed_advantage_weights,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def broadcast_token_advantages(
+    omega: float,
+    masks: List[int],
+) -> List[float]:
+    """
+    Assign a calibrated signed advantage weight ``omega_t`` to every valid token.
+
+    This is ROAD-VLA's token-level advantage construction: ``omega_t`` is the
+    sequence's calibrated signed weight, and it applies uniformly to each action
+    token the policy sampled (the ``e_{a_hat}`` one-hot lands on whichever token
+    was generated at that position). Masked positions receive 0.0.
+
+    Note: this intentionally does NOT distribute ``omega_t`` with a positional
+    weighting -- the paper applies a single signed per-timestep weight, not a
+    position-dependent ramp, and does not normalize it away across the sequence.
+
+    Args:
+        omega: The sequence's calibrated signed advantage weight.
+        masks: Token masks (-100 for padding/ignore, token ID otherwise).
+
+    Returns:
+        Token-level advantages, same length as ``masks``; valid positions receive
+        ``omega`` and masked positions receive 0.0.
+    """
+    if not masks:
+        return []
+    return [omega if mask != -100 else 0.0 for mask in masks]
 
 
 def compute_token_level_advantages(
     sequence_advantages: List[float],
     masks: List[int],
-    num_tokens: int,
+    num_tokens: int = 0,
+    clip: float = DEFAULT_ADVANTAGE_CLIP,
 ) -> List[float]:
     """
-    Distribute sequence-level advantages across tokens.
+    Build token-level advantages for a single sequence (no group context).
 
-    This implements ROAD-VLA's token-level advantage construction. Each token
-    in the sequence receives a share of the sequence's advantage, weighted by
-    its position (later tokens receive slightly higher weight as they are more
-    directly responsible for the outcome).
+    Reduces ``sequence_advantages`` to a scalar, clips it symmetrically to
+    ``[-clip, clip]`` to keep the teacher proximal, and broadcasts that signed
+    weight to every valid token. When a group of sequences is available, prefer
+    :func:`batch_compute_token_advantages`, which standardizes across the group
+    before clipping (the paper's calibration).
 
     Args:
-        sequence_advantages: Sequence-level advantage scores.
+        sequence_advantages: The sequence's advantage scores.
         masks: Token masks (-100 for padding/ignore, token ID otherwise).
-        num_tokens: Total vocabulary size (for normalization).
+        num_tokens: Unused; retained for backward compatibility.
+        clip: Symmetric clip bound for the signed advantage weight.
 
     Returns:
-        Token-level advantages as a list of floats, same length as masks.
-        Non-masked positions receive distributed advantages, masked positions
-        receive 0.0.
+        Token-level advantages, same length as ``masks``.
     """
     if not sequence_advantages or not masks:
         return []
 
-    # Find valid (non-padding) token positions
-    valid_positions = [i for i, mask in enumerate(masks) if mask != -100]
-    if not valid_positions:
-        return [0.0] * len(masks)
-
-    # Average the sequence advantages if multiple are provided
     avg_advantage = float(np.mean(sequence_advantages))
-
-    # Position-weighted distribution: later tokens get slightly higher weight
-    # This reflects that later tokens have more causal influence on outcomes
-    num_valid = len(valid_positions)
-    position_weights = np.linspace(0.5, 1.5, num_valid)  # Linear ramp
-    position_weights /= position_weights.sum()  # Normalize
-
-    # Initialize with zeros (padding tokens get no advantage signal)
-    token_advantages = [0.0] * len(masks)
-
-    # Distribute advantage across valid tokens
-    for idx, pos in enumerate(valid_positions):
-        token_advantages[pos] = avg_advantage * position_weights[idx]
-
-    return token_advantages
+    bound = abs(float(clip))
+    omega = max(-bound, min(bound, avg_advantage))
+    return broadcast_token_advantages(omega, masks)
 
 
 def batch_compute_token_advantages(
     advantages: Optional[List[List[float]]],
     masks: List[List[int]],
+    clip: float = DEFAULT_ADVANTAGE_CLIP,
 ) -> List[List[float]]:
     """
-    Compute token-level advantages for a batch of sequences.
+    Compute token-level advantages for a group of sequences.
+
+    Calibrates one signed weight ``omega_t`` per sequence by standardizing the
+    group's advantages and clipping to ``[-clip, clip]`` (see
+    :func:`~atroposlib.utils.advantage_calibration.calibrate_signed_advantage_weights`),
+    then broadcasts each weight uniformly across that sequence's valid tokens.
 
     Args:
-        advantages: Sequence-level advantages [batch_size][num_sequences] or None.
-        masks: Token masks [batch_size][seq_len].
+        advantages: Per-sequence advantages [num_sequences][*] or None.
+        masks: Token masks [num_sequences][seq_len].
+        clip: Symmetric clip bound applied after standardization.
 
     Returns:
-        Token-level advantages [batch_size][seq_len]. Returns all zeros if
+        Token-level advantages [num_sequences][seq_len]. Returns all zeros if
         advantages is None.
     """
     if advantages is None:
         # No advantages provided, return zeros
         return [[0.0] * len(mask) for mask in masks]
 
+    omegas = calibrate_signed_advantage_weights(advantages, clip=clip)
+
     token_advantages = []
-    for seq_advantages, mask in zip(advantages, masks):
-        token_adv = compute_token_level_advantages(
-            seq_advantages, mask, num_tokens=0
-        )
-        token_advantages.append(token_adv)
+    for omega, mask in zip(omegas, masks):
+        token_advantages.append(broadcast_token_advantages(omega, mask))
 
     return token_advantages
 
@@ -246,6 +269,8 @@ class AdvantageDistillationConfig:
         auto_calibrate: Whether to auto-calibrate advantage scale.
         target_std_ratio: Target std ratio for auto-calibration.
         temperature: Temperature for softening the distribution.
+        advantage_clip: Symmetric clip bound for the calibrated signed advantage
+            weight omega_t (paper uses [-2, 2]); keeps the teacher proximal.
     """
 
     def __init__(
@@ -255,12 +280,14 @@ class AdvantageDistillationConfig:
         auto_calibrate: bool = True,
         target_std_ratio: float = 0.2,
         temperature: float = 1.0,
+        advantage_clip: float = DEFAULT_ADVANTAGE_CLIP,
     ):
         self.enabled = enabled
         self.advantage_scale = advantage_scale
         self.auto_calibrate = auto_calibrate
         self.target_std_ratio = target_std_ratio
         self.temperature = temperature
+        self.advantage_clip = advantage_clip
 
 
 def compute_advantage_distillation_payload(
@@ -299,15 +326,17 @@ def compute_advantage_distillation_payload(
             "calibrated_scale": config.advantage_scale,
         }
 
-    # Step 1: Compute token-level advantages
-    token_advantages = batch_compute_token_advantages(advantages, masks)
+    # Step 1: Compute token-level advantages (paper-faithful signed, clipped omega_t)
+    token_advantages = batch_compute_token_advantages(
+        advantages, masks, clip=config.advantage_clip
+    )
 
     # Step 2: Calibrate advantage scale if requested
     if config.auto_calibrate:
         flat_advantages = [a for seq in token_advantages for a in seq]
         student_logits_std = None
         if student_logits is not None:
-            flat_logits = [l for seq in student_logits for pos in seq for l in pos]
+            flat_logits = [x for seq in student_logits for pos in seq for x in pos]
             if flat_logits:
                 student_logits_std = float(np.std(flat_logits))
 

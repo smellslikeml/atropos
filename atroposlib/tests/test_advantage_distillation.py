@@ -8,9 +8,10 @@ dense token-level supervision through advantage-shaped teacher logits.
 
 import math
 
-import numpy as np
-import pytest
-
+from atroposlib.utils.advantage_calibration import (
+    DEFAULT_ADVANTAGE_CLIP,
+    calibrate_signed_advantage_weights,
+)
 from atroposlib.utils.advantage_distillation import (
     AdvantageDistillationConfig,
     batch_compute_token_advantages,
@@ -42,35 +43,43 @@ class TestComputeTokenLevelAdvantages:
         assert result == [0.0, 0.0, 0.0]
 
     def test_valid_tokens_get_advantages(self):
-        """Test that valid tokens receive distributed advantages."""
+        """Valid tokens all receive the sequence's signed weight; masked get 0."""
         masks = [-100, 5, -100, 7]
-        result = compute_token_level_advantages([1.0], masks, num_tokens=10)
+        result = compute_token_level_advantages([1.0], masks)
         # Only positions 1 and 3 should have non-zero advantages
         assert result[0] == 0.0  # Masked
-        assert result[1] > 0  # Valid
+        assert result[1] == 1.0  # Valid
         assert result[2] == 0.0  # Masked
-        assert result[3] > 0  # Valid
-        # Later valid token should have higher weight
-        assert result[3] > result[1]
+        assert result[3] == 1.0  # Valid
+        # ROAD-VLA applies a single signed per-timestep weight (no position ramp)
+        assert result[3] == result[1]
 
-    def test_multiple_advantages_averaged(self):
-        """Test that multiple sequence advantages are averaged."""
+    def test_multiple_advantages_reduced_to_scalar(self):
+        """Multiple advantages reduce to their mean, broadcast to valid tokens."""
         masks = [-100, 5, 7]
-        result = compute_token_level_advantages([1.0, 2.0, 3.0], masks, num_tokens=10)
-        # Average is 2.0, distributed across valid tokens
+        result = compute_token_level_advantages([1.0, 2.0, 3.0], masks)
+        # Mean is 2.0, applied uniformly to each valid token (no dilution)
         assert result[0] == 0.0  # Masked
-        assert result[1] > 0
-        assert result[2] > 0
-        # Sum of valid advantages should reflect average
-        valid_sum = result[1] + result[2]
-        assert math.isclose(valid_sum, 2.0, rel_tol=0.1)
+        assert math.isclose(result[1], 2.0)
+        assert math.isclose(result[2], 2.0)
 
-    def test_position_weighting(self):
-        """Test that later tokens receive higher weights."""
+    def test_uniform_weighting(self):
+        """All valid tokens receive equal weight (no positional ramp)."""
         masks = [1, 2, 3, 4]
-        result = compute_token_level_advantages([1.0], masks, num_tokens=10)
-        # Each successive token should have higher advantage
-        assert result[0] < result[1] < result[2] < result[3]
+        result = compute_token_level_advantages([1.0], masks)
+        assert result[0] == result[1] == result[2] == result[3] == 1.0
+
+    def test_negative_advantage_is_signed(self):
+        """Negative advantages are preserved (no ReLU)."""
+        masks = [1, 2, 3]
+        result = compute_token_level_advantages([-1.5], masks)
+        assert all(math.isclose(r, -1.5) for r in result)
+
+    def test_symmetric_clip(self):
+        """A large-magnitude advantage is clipped symmetrically to [-clip, clip]."""
+        masks = [1, 2]
+        assert compute_token_level_advantages([9.0], masks, clip=2.0) == [2.0, 2.0]
+        assert compute_token_level_advantages([-9.0], masks, clip=2.0) == [-2.0, -2.0]
 
 
 class TestBatchComputeTokenAdvantages:
@@ -82,19 +91,28 @@ class TestBatchComputeTokenAdvantages:
         result = batch_compute_token_advantages(None, masks)
         assert result == [[0.0, 0.0], [0.0, 0.0]]
 
-    def test_batch_processes_correctly(self):
-        """Test that batch processing works correctly."""
+    def test_batch_standardizes_across_group(self):
+        """Batch standardizes advantages across the group, then broadcasts."""
         advantages = [[1.0], [2.0]]
         masks = [[-100, 5], [6, 7]]
         result = batch_compute_token_advantages(advantages, masks)
         assert len(result) == 2
-        # First sequence: one valid token
+        # Group mean 1.5, std 0.5 -> z-scores -1 and +1 (within the clip range).
+        # First sequence: masked position stays 0, the lower-advantage sequence
+        # gets a negative signed weight.
         assert result[0][0] == 0.0
-        assert result[0][1] > 0
-        # Second sequence: two valid tokens
-        assert result[1][0] > 0
-        assert result[1][1] > 0
-        assert result[1][1] > result[1][0]  # Later token higher
+        assert math.isclose(result[0][1], -1.0)
+        # Second (higher-advantage) sequence gets a positive weight, applied
+        # uniformly to both valid tokens.
+        assert math.isclose(result[1][0], 1.0)
+        assert math.isclose(result[1][1], 1.0)
+
+    def test_batch_zero_variance_group_emits_no_signal(self):
+        """A group with identical advantages produces no perturbation (stable)."""
+        advantages = [[1.0], [1.0]]
+        masks = [[5, 6], [7, 8]]
+        result = batch_compute_token_advantages(advantages, masks)
+        assert result == [[0.0, 0.0], [0.0, 0.0]]
 
 
 class TestConstructAdvantageShapedLogits:
@@ -220,15 +238,17 @@ class TestComputeAdvantageDistillationPayload:
         assert result["advantage_logits"] is None
 
     def test_enabled_returns_token_advantages(self):
-        """Test that enabled config computes token advantages."""
+        """Test that enabled config computes signed, calibrated token advantages."""
         result = compute_advantage_distillation_payload(
             [[1.0], [2.0]], [[-100, 5], [6, 7]], config=None
         )
         assert result["token_advantages"] is not None
         assert len(result["token_advantages"]) == 2
-        # First sequence has one valid token
+        # Masked position stays 0; the lower-advantage sequence is signed negative
         assert result["token_advantages"][0][0] == 0.0
-        assert result["token_advantages"][0][1] > 0
+        assert result["token_advantages"][0][1] < 0
+        # Higher-advantage sequence is signed positive and applied to every token
+        assert all(v > 0 for v in result["token_advantages"][1])
 
     def test_auto_calibrate_sets_scale(self):
         """Test that auto-calibrate computes calibrated scale."""
@@ -243,9 +263,7 @@ class TestComputeAdvantageDistillationPayload:
 
     def test_no_auto_calibrate_uses_config_scale(self):
         """Test that disabled auto-calibrate uses config scale."""
-        config = AdvantageDistillationConfig(
-            auto_calibrate=False, advantage_scale=0.5
-        )
+        config = AdvantageDistillationConfig(auto_calibrate=False, advantage_scale=0.5)
         result = compute_advantage_distillation_payload(
             [[1.0], [2.0]], [[1, 2], [3, 4]], config=config
         )
@@ -283,12 +301,85 @@ class TestAdvantageDistillationIntegration:
         assert isinstance(result["calibrated_scale"], float)
 
     def test_masked_tokens_receive_zero_advantage(self):
-        """Test that masked tokens always receive zero advantage."""
+        """Masked tokens always receive zero advantage; valid tokens get omega_t."""
+        # Two-sequence group so the advantage standardization is well-defined.
         result = compute_advantage_distillation_payload(
-            [[1.0]], [[-100, -100, 5, -100]], config=AdvantageDistillationConfig()
+            [[2.0], [1.0]],
+            [[-100, -100, 5, -100], [6, 7, 8, 9]],
+            config=AdvantageDistillationConfig(),
         )
         token_advantages = result["token_advantages"][0]
         assert token_advantages[0] == 0.0
         assert token_advantages[1] == 0.0
-        assert token_advantages[2] > 0  # Only unmasked token
+        assert token_advantages[2] != 0.0  # Only unmasked token carries omega_t
         assert token_advantages[3] == 0.0
+
+
+class TestSignedAdvantageCalibration:
+    """Paper-faithful calibration: signed, standardized, symmetrically clipped."""
+
+    def test_standardizes_to_zero_mean_unit_std(self):
+        """Weights are the group's z-scores when within the clip range."""
+        weights = calibrate_signed_advantage_weights([[1.0], [2.0], [3.0]])
+        # Mean 2.0, std ~0.8165 -> z-scores approx [-1.2247, 0, 1.2247]
+        assert math.isclose(weights[1], 0.0, abs_tol=1e-9)
+        assert math.isclose(weights[0], -weights[2], rel_tol=1e-9)
+        assert weights[0] < 0 < weights[2]
+
+    def test_no_relu_negative_preserved(self):
+        """Below-average sequences keep a negative sign (no ReLU rectification)."""
+        weights = calibrate_signed_advantage_weights([[0.0], [10.0]])
+        assert weights[0] < 0
+        assert weights[1] > 0
+
+    def test_symmetric_clip_bounds_perturbation(self):
+        """Outliers are clipped to +/- clip, keeping the teacher proximal."""
+        # Six zeros + one large value: the outlier's z-score (~2.449) exceeds 2.
+        weights = calibrate_signed_advantage_weights([[0.0]] * 6 + [[100.0]], clip=2.0)
+        assert all(abs(w) <= 2.0 + 1e-9 for w in weights)
+        assert max(weights) == 2.0
+
+    def test_zero_variance_group_is_all_zero(self):
+        """Zero-variance groups emit no signal (mitigates issue #457 spikes)."""
+        assert calibrate_signed_advantage_weights([[1.0], [1.0], [1.0]]) == [
+            0.0,
+            0.0,
+            0.0,
+        ]
+
+    def test_empty_group_returns_empty(self):
+        assert calibrate_signed_advantage_weights([]) == []
+
+    def test_default_clip_is_two(self):
+        assert DEFAULT_ADVANTAGE_CLIP == 2.0
+
+
+class TestPayloadWiresCalibration:
+    """The payload entry point (call site) must honor the calibration + clip."""
+
+    def test_payload_token_advantages_respect_clip(self):
+        """token_advantages come out signed and bounded by the configured clip."""
+        config = AdvantageDistillationConfig(advantage_clip=1.0)
+        result = compute_advantage_distillation_payload(
+            [[-50.0], [0.0], [50.0]],
+            [[5], [6], [7]],
+            config=config,
+        )
+        flat = [v for seq in result["token_advantages"] for v in seq]
+        assert all(abs(v) <= 1.0 + 1e-9 for v in flat)
+        # Lowest-advantage sequence pinned to -clip, highest to +clip
+        assert math.isclose(result["token_advantages"][0][0], -1.0)
+        assert math.isclose(result["token_advantages"][2][0], 1.0)
+
+    def test_payload_matches_direct_calibration(self):
+        """Token advantages equal the calibrated omega broadcast over valid tokens."""
+        advantages = [[1.0], [4.0]]
+        masks = [[5, 6], [7, -100]]
+        result = compute_advantage_distillation_payload(
+            advantages, masks, config=AdvantageDistillationConfig()
+        )
+        omegas = calibrate_signed_advantage_weights(
+            advantages, clip=DEFAULT_ADVANTAGE_CLIP
+        )
+        assert result["token_advantages"][0] == [omegas[0], omegas[0]]
+        assert result["token_advantages"][1] == [omegas[1], 0.0]

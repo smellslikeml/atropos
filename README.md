@@ -374,6 +374,38 @@ Why same-tokenizer is required:
 - If the teacher uses a different vocabulary, the same integer token ID refers to different text on the teacher and student sides.
 - A decode/re-tokenize/remap pipeline is not a safe drop-in fix because it changes both token positions and token identities, which breaks the exact per-position token supervision that the current distillation loss assumes.
 
+### Advantage-guided self-distillation
+
+_Adapted from [ROAD-VLA: Robust Online Adaptation via Self-Distillation for Vision-Language-Action Models](https://arxiv.org/abs/2606.25800v1)._
+
+`TeacherDistillationEnv` can additionally convert the sparse group advantages
+into a dense, token-level supervision signal. Set on `TeacherDistillationConfig`:
+
+```python
+TeacherDistillationConfig(
+    teacher_enabled=True,
+    advantage_distillation_enabled=True,
+)
+```
+
+When enabled, the group's advantages are calibrated into a signed per-sequence
+weight `omega_t` (standardized across the group, then clipped symmetrically to
+`[-2, 2]`, with no rectification) and broadcast to every action token the policy
+sampled. The result is attached to the payload as `distill_token_advantages`
+(shape `[sequence][position]`), alongside `distill_advantage_scale`.
+
+- The weight is **signed**: below-average sequences push probability mass away
+  from the sampled tokens, above-average sequences push toward them.
+- The **symmetric clip** keeps the shaped teacher proximal to the current policy
+  and degrades gracefully on low-variance groups (zero variance -> no signal),
+  avoiding the unbounded `advantage / std` blow-up.
+
+This adapts ROAD-VLA's action-space teacher (`softmax(z + eta * omega * e)`) to
+Atropos's text-token distillation path. The token-space calibration lives in
+`atroposlib/utils/advantage_calibration.py`; consuming `distill_token_advantages`
+in the trainer loss is intentionally out of scope here (the transport contract is
+the same as for `distill_token_ids`/`distill_logprobs`).
+
 ---
 
 ## Testing and Debugging Tools
