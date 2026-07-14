@@ -22,6 +22,8 @@ from pydantic import Field
 from pydantic_cli import Cmd
 from rich import print as rprint
 
+from typing import Callable
+
 from ..utils.cli import (
     extract_namespace,
     get_double_dash_flags,
@@ -33,6 +35,10 @@ from .constants import ENV_NAMESPACE, NAMESPACE_SEP, OPENAI_NAMESPACE
 from .server_handling.openai_server import resolve_openai_configs
 from .server_handling.server_baseline import APIServerConfig, ServerBaseline
 from .server_handling.server_manager import ServerManager, ServerManagerConfig
+from .verifiable_curriculum import (
+    ExecutionJudge,
+    VerifiableCurriculum,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +56,36 @@ class TeacherDistillationConfig(BaseEnvConfig):
             "Use 0 for selected-token-only prompt logprobs and <= -1 to disable "
             "teacher fetching."
         ),
+    )
+    # RLVR (Reinforcement Learning with Verifiable Rewards) configuration
+    rlvr_enabled: bool = Field(
+        default=False,
+        description="Enable RLVR mode with compete-then-collaborate framework.",
+    )
+    rlvr_competition_mode: str = Field(
+        default="execution_based",
+        description=(
+            "Mode for teacher competition: execution_based, majority_vote, none. "
+            "See CompetitionMode enum in verifiable_curriculum.py."
+        ),
+    )
+    rlvr_curriculum_mode: str = Field(
+        default="collaborative_pool",
+        description=(
+            "Mode for curriculum generation: collaborative_pool, best_teacher_only, "
+            "verified_only. See CurriculumMode enum in verifiable_curriculum.py."
+        ),
+    )
+    rlvr_min_verified_teachers: int = Field(
+        default=2,
+        description=(
+            "Minimum number of teachers with verified solutions "
+            "for collaboration."
+        ),
+    )
+    rlvr_reward_scale: float = Field(
+        default=1.0,
+        description="Scale factor for RLVR rewards.",
     )
 
 
@@ -292,6 +328,8 @@ class TeacherDistillationEnv(BaseEnv, ABC):
     ):
         super().__init__(config, server_configs, slurm=slurm, testing=testing)
         self.teacher_server: Optional[ServerManager] = None
+        self.teacher_servers: List[ServerManager] = []
+        self.verifiable_curriculum: Optional[VerifiableCurriculum] = None
 
         if config.teacher_enabled:
             if teacher_server_configs is None:
@@ -302,15 +340,45 @@ class TeacherDistillationEnv(BaseEnv, ABC):
                     "path with --teacher.* flags. The generic BaseEnv 'process' and "
                     "'evaluate' commands do not currently wire teacher_server_configs."
                 )
+
+            # Normalize to list for multi-teacher support
             if isinstance(teacher_server_configs, APIServerConfig):
                 teacher_config_source = [teacher_server_configs]
             else:
                 teacher_config_source = teacher_server_configs
-            self.teacher_server = ServerManager(
-                teacher_config_source,
-                slurm=False,
-                testing=False,
-            )
+
+            # Create ServerManager for each teacher config
+            # (multi-teacher support)
+            if isinstance(teacher_config_source, list):
+                for teacher_cfg in teacher_config_source:
+                    cfg_list = (
+                        [teacher_cfg]
+                        if isinstance(teacher_cfg, APIServerConfig)
+                        else teacher_cfg
+                    )
+                    self.teacher_servers.append(
+                        ServerManager(
+                            cfg_list,
+                            slurm=False,
+                            testing=False,
+                        )
+                    )
+            else:
+                self.teacher_servers.append(
+                    ServerManager(
+                        teacher_config_source,
+                        slurm=False,
+                        testing=False,
+                    )
+                )
+
+            # For backward compatibility, set single teacher_server
+            if self.teacher_servers:
+                self.teacher_server = self.teacher_servers[0]
+            else:
+                self.teacher_server = None
+
+            # Validate tokenizer compatibility (use first teacher as reference)
             if isinstance(teacher_config_source, list):
                 teacher_cfg = teacher_config_source[0]
             else:
@@ -322,6 +390,10 @@ class TeacherDistillationEnv(BaseEnv, ABC):
                 else teacher_cfg.tokenizer_name
             )
             self._validate_teacher_tokenizer_compatibility(teacher_tokenizer_name)
+
+            # Initialize Verifiable Curriculum if RLVR is enabled
+            if config.rlvr_enabled:
+                self._initialize_verifiable_curriculum()
 
     # ------------------------------------------------------------------
     # Core fetch
@@ -342,8 +414,9 @@ class TeacherDistillationEnv(BaseEnv, ABC):
             )
         except Exception as exc:
             raise ValueError(
-                "Cross-tokenizer distillation is not supported in this PR, and the "
-                f"teacher tokenizer for '{teacher_tokenizer_name}' could not be loaded to "
+                "Cross-tokenizer distillation is not supported in this "
+                "PR, and the teacher tokenizer for "
+                f"'{teacher_tokenizer_name}' could not be loaded to "
                 f"verify compatibility: {exc}"
             ) from exc
 
@@ -351,10 +424,109 @@ class TeacherDistillationEnv(BaseEnv, ABC):
         teacher_vocab = teacher_tokenizer.get_vocab()
         if student_vocab != teacher_vocab:
             raise ValueError(
-                "Cross-tokenizer distillation is not supported in this PR. "
-                f"Student tokenizer '{student_tok_name or type(self.tokenizer).__name__}' "
-                f"and teacher tokenizer '{teacher_tokenizer_name}' do not match."
+                "Cross-tokenizer distillation is not supported in "
+                "this PR. Student tokenizer "
+                f"'{student_tok_name or type(self.tokenizer).__name__}' "
+                f"and teacher tokenizer '{teacher_tokenizer_name}' "
+                "do not match."
             )
+
+    # ------------------------------------------------------------------
+    # RLVR (Reinforcement Learning with Verifiable Rewards) methods
+    # ------------------------------------------------------------------
+
+    def _initialize_verifiable_curriculum(self) -> None:
+        """
+        Initialize the verifiable curriculum for RLVR mode.
+
+        This method creates a VerifiableCurriculum instance with the
+        configured competition and curriculum modes.
+
+        Note: Subclasses should override this method to provide a
+        task-specific ExecutionJudge for their domain (e.g., SQL judge
+        for SQL tasks, code execution judge for coding tasks).
+        """
+        raise NotImplementedError(
+            "RLVR mode requires a task-specific ExecutionJudge. "
+            "Subclasses of TeacherDistillationEnv must override "
+            "_initialize_verifiable_curriculum to provide a judge instance "
+            "for their task domain."
+        )
+
+    def _create_execution_judge(self) -> ExecutionJudge:
+        """
+        Create an execution-based judge for RLVR verification.
+
+        Subclasses should override this method to return a domain-specific
+        ExecutionJudge (e.g., SQLJudge for SQL tasks, CodeJudge for coding).
+
+        Returns:
+            An ExecutionJudge instance for the task domain.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement _create_execution_judge to provide "
+            "a task-specific judge for RLVR verification."
+        )
+
+    async def _run_teacher_competition(
+        self, item: Any, prompt_generator: Callable[[Any], str]
+    ) -> Dict[str, Any]:
+        """
+        Run teacher competition for a single item using RLVR framework.
+
+        This method orchestrates the compete-then-collaborate process:
+        1. Each teacher generates a solution
+        2. Solutions are verified by execution-based judge
+        3. Teacher rankings are updated
+        4. Collaborative curriculum sample is built
+
+        Args:
+            item: The problem/item to solve
+            prompt_generator: Function to generate the prompt from the item
+
+        Returns:
+            Dict containing competition results and collaborative sample
+        """
+        if self.verifiable_curriculum is None:
+            raise RuntimeError(
+                "Verifiable curriculum not initialized. Set "
+                "rlvr_enabled=True and ensure "
+                "_initialize_verifiable_curriculum is implemented."
+            )
+
+        solutions = await self.verifiable_curriculum.compete_teachers(
+            item, prompt_generator
+        )
+        self.verifiable_curriculum.update_rankings(solutions)
+        sample = self.verifiable_curriculum.build_collaborative_sample(
+            solutions, item
+        )
+
+        return {
+            "solutions": solutions,
+            "sample": sample,
+            "stats": self.verifiable_curriculum.get_curriculum_stats(),
+        }
+
+    def compute_rlvr_reward(
+        self, student_solution: str, collaborative_sample: Any
+    ) -> float:
+        """
+        Compute RLVR reward for a student solution.
+
+        Args:
+            student_solution: The student's generated solution
+            collaborative_sample: The collaborative curriculum sample
+
+        Returns:
+            Reward signal (typically +1.0 for verified, -1.0 for failed)
+        """
+        if self.verifiable_curriculum is None:
+            raise RuntimeError("Verifiable curriculum not initialized.")
+
+        return self.verifiable_curriculum.compute_rlvr_reward(
+            student_solution, collaborative_sample
+        )
 
     async def _fetch_teacher_for_sequence(
         self, token_ids: List[int], top_k: int
