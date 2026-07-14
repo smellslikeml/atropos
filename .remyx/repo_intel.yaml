@@ -34,6 +34,12 @@ observed_landing_zones:
     branch: designing-reward-signals-for-portable-query-generation-a-cas
     timestamp: '2026-07-14T16:38:18Z'
   last_observed: '2026-07-14T16:38:18Z'
-rejected_shapes: []
+rejected_shapes:
+- shape_tag: null
+  reason_code: null
+  reason_summary: ''
+  observed:
+  - arxiv: 2606.25800v1
+    timestamp: '2026-07-14T17:28:58Z'
 coordination_signals: []
-last_updated: '2026-07-14T16:38:18Z'
+last_updated: '2026-07-14T17:28:58Z'
