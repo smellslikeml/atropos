@@ -12,6 +12,26 @@ on:
   #   - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
+      mode:
+        description: 'Action mode. recommend (default) = scout + draft. fidelity/convention/test = re-run one phase of the refinement chain on an existing PR (requires pr-number). issue-convention = re-align an existing Issue body to repo templates (requires issue-number).'
+        type: choice
+        required: false
+        default: 'recommend'
+        options:
+          - recommend
+          - fidelity
+          - convention
+          - test
+          - issue-convention
+          - weekly-summary
+      pr-number:
+        description: 'PR number to operate on. Read in mode=fidelity/convention/test. Empty in recommend mode.'
+        required: false
+        default: ''
+      issue-number:
+        description: 'Issue number to operate on. Read in mode=issue-convention.'
+        required: false
+        default: ''
       provider:
         description: 'Which model provider to route Claude Code at.'
         type: choice
@@ -92,6 +112,9 @@ jobs:
         with:
           interest-id: f17d1f4c-a9cd-4c8f-bd57-8b076ff6f2ed
           rate-limit-days: '0'
+          mode: ${{ inputs.mode || 'recommend' }}
+          pr-number: ${{ inputs.pr-number || '' }}
+          issue-number: ${{ inputs.issue-number || '' }}
           # DEPRECATED in v1.7.24 — kept until upstream removes the input; no-op
           # today. Legacy from before the permissive-default guardrails ship.
           guardrails-allowlist: '.gitignore,.dockerignore,requirements*.txt,setup.py,setup.cfg,pyproject.toml,MANIFEST.in'
