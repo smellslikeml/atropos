@@ -7,36 +7,18 @@ observed_landing_zones:
   confirmed_by:
   - arxiv: 2606.25800v1
     mode: Mode 2 (adapted port)
-    call_site_specifics: "atroposlib/envs/teacher_distillation_env.py:464 \u2014 TeacherDistillationEnv._attach_teacher_distillation()\
-      \ calls compute_advantage_distillation_payload(); that method is invoked from\
-      \ handle_send_to_api()"
+    call_site_specifics: TeacherDistillationEnv._attach_teacher_distillation() in
+      atroposlib/envs/teacher_distillation_env.py, invoked from handle_send_to_api()
+      for environments inheriting TeacherDistillationEnv (e.g., GSM8kT
     branch: road-vla-robust-online-adaptation-via-self-distillation-for-
-    timestamp: '2026-07-14T16:27:39Z'
-    pr: 13
-  last_observed: '2026-07-14T16:27:39Z'
-- path: atroposlib/envs/reward_fns/
-  shape_tags:
-  - library-shape-public-api
-  - registry-add
-  confirmed_by:
+    timestamp: '2026-07-14T14:39:17Z'
+  last_observed: '2026-07-14T14:39:17Z'
+rejected_shapes:
+- shape_tag: null
+  reason_code: null
+  reason_summary: ''
+  observed:
   - arxiv: 2606.17680v1
-    mode: ''
-    call_site_specifics: ''
-    branch: envrl-learn-from-environment-dynamics-in-agentic-reinforceme
-    timestamp: '2026-07-14T15:16:48Z'
-  - arxiv: 2606.24428v1
-    mode: ''
-    call_site_specifics: ''
-    branch: escaping-the-self-confirmation-trap-an-execute-distill-verif
-    timestamp: '2026-07-14T15:57:34Z'
-  - arxiv: 2606.27291v1
-    mode: Mode 2 (adapted port)
-    call_site_specifics: Registered in the reward_fns `registry` (via `@registry.register`,
-      reachable through `registry.create("reward_floor", ...)`) and exported from
-      `atroposlib/envs/reward_fns/__init__.py`; consumable in a
-    pr: 16
-    timestamp: '2026-07-14T18:43:39Z'
-  last_observed: '2026-07-14T18:43:39Z'
-rejected_shapes: []
+    timestamp: '2026-07-14T20:57:47Z'
 coordination_signals: []
-last_updated: '2026-07-14T18:43:39Z'
+last_updated: '2026-07-14T20:57:47Z'
