@@ -1,12 +1,7 @@
 name: Outrider
 
 on:
-  # Continuous-mode cron for the drafter role: */15 for E2E testing of the
-  # two-tier drafter/refiner split. Will fire naturally once z.ai quota
-  # resets (~2026-07-15 24:00 UTC); until then, drafter dispatches can be
-  # triggered manually via workflow_dispatch. The refiner picks from the
-  # existing branch pool (5+ candidates already accumulated today), so E2E
-  # validation of the refiner can proceed without waiting for fresh drafts.
+  # Continuous drafter cron. Serialized by the concurrency group below.
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
