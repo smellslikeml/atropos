@@ -5,6 +5,7 @@ Trains LLMs to generate correct SQL queries from natural language questions.
 Uses the Salesforce/WikiSQL dataset with execution-based scoring.
 """
 
+import logging
 import random
 from typing import Any, Dict, List, Optional, Tuple, TypedDict, Union
 
@@ -24,7 +25,10 @@ from atroposlib.envs.base import (
     BaseEnvConfig,
     ScoredDataGroup,
 )
+from atroposlib.envs.reward_fns.consensus_reward import consensus_reward
 from atroposlib.type_definitions import Item
+
+logger = logging.getLogger(__name__)
 
 # System prompt following the established Atropos pattern
 system_prompt = (
@@ -89,11 +93,28 @@ class SQLQueryEnv(BaseEnv):
         server_configs: List[APIServerConfig],
         slurm=True,
         testing=False,
+        enable_edv_consensus: bool = False,
+        edv_consensus_threshold: float = 0.5,
     ):
+        """
+        Initialize the SQL Query Environment.
+
+        Args:
+            config: Base environment configuration
+            server_configs: API server configurations
+            slurm: Whether to use SLURM
+            testing: Whether in testing mode
+            enable_edv_consensus: Enable EDV-style consensus verification
+            edv_consensus_threshold: Consensus threshold for EDV verification
+        """
         super().__init__(config, server_configs, slurm, testing)
         self.percent_correct_buffer = list()
         self.eval_metrics = list()
         self.execution_success_buffer = list()
+        self.enable_edv_consensus = enable_edv_consensus
+        self.edv_consensus_threshold = edv_consensus_threshold
+        self.edv_filter_count = 0
+        self.edv_total_count = 0
 
     @classmethod
     def config_init(cls) -> Tuple[BaseEnvConfig, List[APIServerConfig]]:
@@ -213,6 +234,58 @@ class SQLQueryEnv(BaseEnv):
             return 1.0, True
         else:
             return -1.0, True
+
+    def _apply_edv_consensus_verification(
+        self,
+        rollout_group_data: List[Dict],
+        execution_scores: List[float],
+    ) -> List[bool]:
+        """
+        Apply EDV-style consensus verification to filter candidates.
+
+        This implements the Distill-Verify stages of the EDV paradigm:
+        - Distill: Comparative analysis of candidate trajectories
+        - Verify: Consensus-based filtering before memory insertion
+
+        Args:
+            rollout_group_data: Candidate trajectory data
+            execution_scores: Execution-based scores for each candidate
+
+        Returns:
+            List of booleans indicating which candidates pass verification
+        """
+        self.edv_total_count += 1
+
+        # Extract completion content for consensus analysis
+        completions = []
+        for item in rollout_group_data:
+            content = item["messages"][-1]["content"]
+            completions.append({"role": "assistant", "content": content})
+
+        # Apply consensus-based reward function
+        try:
+            consensus_rewards = consensus_reward(
+                completions=completions,
+                execution_scores=execution_scores,
+            )
+
+            # Filter candidates based on consensus score
+            is_valid = []
+            for reward in consensus_rewards:
+                # Candidates with negative consensus scores are filtered out
+                is_valid.append(reward >= 0.0)
+
+            # Track filtering statistics
+            filtered_count = sum(1 for valid in is_valid if not valid)
+            if filtered_count > 0:
+                self.edv_filter_count += 1
+
+            return is_valid
+
+        except Exception as e:
+            logger.warning(f"EDV consensus verification failed: {e}")
+            # On error, allow all candidates to proceed
+            return [True] * len(rollout_group_data)
 
     async def rollout_and_score_eval(
         self, question: str, gold_sql: str, header: List[str], rows: List[List[Any]]
@@ -356,6 +429,10 @@ class SQLQueryEnv(BaseEnv):
 
         random.shuffle(rollout_group_data)
 
+        # Stage 1: Execute - Score all candidates by execution
+        execution_scores = []
+        candidate_data = []
+
         for item in rollout_group_data:
             response_content = item["messages"][-1]["content"]
 
@@ -376,13 +453,42 @@ class SQLQueryEnv(BaseEnv):
             if len([1 for i in masks if i != -100]) < 10:
                 continue
 
-            scores["tokens"].append(tokens)
-            scores["masks"].append(masks)
-            scores["inference_logprobs"].append(logprobs)
-            scores["scores"].append(reward)
+            candidate_data.append({
+                "messages": item["messages"],
+                "tokens": tokens,
+                "masks": masks,
+                "logprobs": logprobs,
+                "response_content": response_content,
+            })
+            execution_scores.append(reward)
 
-            if len(scores["tokens"]) >= self.config.group_size:
+            if len(candidate_data) >= self.config.group_size:
                 break
+
+        # Stage 2 & 3: Distill & Verify - Apply EDV consensus verification if enabled
+        if self.enable_edv_consensus and len(candidate_data) > 1:
+            is_valid = self._apply_edv_consensus_verification(
+                candidate_data, execution_scores
+            )
+
+            # Filter candidates based on consensus verification
+            for i, valid in enumerate(is_valid):
+                if valid:
+                    scores["tokens"].append(candidate_data[i]["tokens"])
+                    scores["masks"].append(candidate_data[i]["masks"])
+                    scores["inference_logprobs"].append(candidate_data[i]["logprobs"])
+                    scores["scores"].append(execution_scores[i])
+        else:
+            # No EDV verification, use all candidates
+            for i, data in enumerate(candidate_data):
+                scores["tokens"].append(data["tokens"])
+                scores["masks"].append(data["masks"])
+                scores["inference_logprobs"].append(data["logprobs"])
+                scores["scores"].append(execution_scores[i])
+
+        # Skip if no valid candidates
+        if not scores["tokens"]:
+            return None
 
         for score in scores["scores"]:
             self.percent_correct_buffer.append(max(score, 0))
