@@ -28,6 +28,17 @@ observed_landing_zones:
     branch: escaping-the-self-confirmation-trap-an-execute-distill-verif-v2
     timestamp: '2026-07-14T22:44:30Z'
   last_observed: '2026-07-14T22:44:30Z'
+- path: atroposlib/utils/
+  shape_tags:
+  - unclassified
+  confirmed_by:
+  - arxiv: 2606.31575v1
+    mode: Mode 1 (direct port)
+    call_site_specifics: 'example_trainer/trainers.py (main training loop at line
+      714: run_training_step) -> compute_grpo_loss with token_selector_config parameter'
+    branch: which-tokens-matter-adaptive-token-selection-for-rlvr-with-t
+    timestamp: '2026-07-14T23:30:37Z'
+  last_observed: '2026-07-14T23:30:37Z'
 rejected_shapes:
 - shape_tag: null
   reason_code: null
@@ -36,4 +47,4 @@ rejected_shapes:
   - arxiv: 2606.17680v1
     timestamp: '2026-07-14T20:57:47Z'
 coordination_signals: []
-last_updated: '2026-07-14T22:44:30Z'
+last_updated: '2026-07-14T23:30:37Z'
