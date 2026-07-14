@@ -50,7 +50,13 @@ class _CapturingServerManager:
 @pytest.mark.asyncio
 async def test_attach_teacher_distillation_success():
     env = object.__new__(_ConcreteTeacherEnv)
-    env.config = SimpleNamespace(teacher_enabled=True, teacher_top_k=2)
+    env.config = SimpleNamespace(
+        teacher_enabled=True,
+        teacher_top_k=2,
+        advantage_distillation_enabled=False,
+        advantage_distillation_scale=0.1,
+        advantage_distillation_auto_calibrate=False,
+    )
     env.teacher_server = _FakeTeacherServer()
 
     group = {
@@ -70,7 +76,13 @@ async def test_attach_teacher_distillation_success():
 @pytest.mark.asyncio
 async def test_attach_teacher_distillation_failure_drops_payload():
     env = object.__new__(_ConcreteTeacherEnv)
-    env.config = SimpleNamespace(teacher_enabled=True, teacher_top_k=2)
+    env.config = SimpleNamespace(
+        teacher_enabled=True,
+        teacher_top_k=2,
+        advantage_distillation_enabled=False,
+        advantage_distillation_scale=0.1,
+        advantage_distillation_auto_calibrate=False,
+    )
     env.teacher_server = _FakeTeacherServer(fail_on_call=2)
 
     group = {
@@ -87,7 +99,13 @@ async def test_attach_teacher_distillation_failure_drops_payload():
 @pytest.mark.asyncio
 async def test_attach_teacher_distillation_negative_topk_skips_fetch():
     env = object.__new__(_ConcreteTeacherEnv)
-    env.config = SimpleNamespace(teacher_enabled=True, teacher_top_k=-1)
+    env.config = SimpleNamespace(
+        teacher_enabled=True,
+        teacher_top_k=-1,
+        advantage_distillation_enabled=False,
+        advantage_distillation_scale=0.1,
+        advantage_distillation_auto_calibrate=False,
+    )
     env.teacher_server = _FakeTeacherServer()
 
     group = {
@@ -105,7 +123,13 @@ async def test_attach_teacher_distillation_negative_topk_skips_fetch():
 @pytest.mark.asyncio
 async def test_attach_teacher_distillation_zero_topk_passthrough():
     env = object.__new__(_ConcreteTeacherEnv)
-    env.config = SimpleNamespace(teacher_enabled=True, teacher_top_k=0)
+    env.config = SimpleNamespace(
+        teacher_enabled=True,
+        teacher_top_k=0,
+        advantage_distillation_enabled=False,
+        advantage_distillation_scale=0.1,
+        advantage_distillation_auto_calibrate=False,
+    )
     env.teacher_server = _FakeTeacherServer()
 
     group = {
@@ -123,7 +147,13 @@ async def test_attach_teacher_distillation_zero_topk_passthrough():
 @pytest.mark.asyncio
 async def test_attach_teacher_distillation_group_override_topk_is_used():
     env = object.__new__(_ConcreteTeacherEnv)
-    env.config = SimpleNamespace(teacher_enabled=True, teacher_top_k=0)
+    env.config = SimpleNamespace(
+        teacher_enabled=True,
+        teacher_top_k=0,
+        advantage_distillation_enabled=False,
+        advantage_distillation_scale=0.1,
+        advantage_distillation_auto_calibrate=False,
+    )
 
     seen_topks = []
 
@@ -149,7 +179,13 @@ async def test_attach_teacher_distillation_group_override_topk_is_used():
 @pytest.mark.asyncio
 async def test_attach_teacher_distillation_group_override_can_skip_fetch():
     env = object.__new__(_ConcreteTeacherEnv)
-    env.config = SimpleNamespace(teacher_enabled=True, teacher_top_k=2)
+    env.config = SimpleNamespace(
+        teacher_enabled=True,
+        teacher_top_k=2,
+        advantage_distillation_enabled=False,
+        advantage_distillation_scale=0.1,
+        advantage_distillation_auto_calibrate=False,
+    )
     env.teacher_server = _FakeTeacherServer()
 
     group = {
@@ -342,3 +378,144 @@ def test_resolve_teacher_server_configs_uses_teacher_namespace(monkeypatch):
         "openai": {"tokenizer_name": "teacher-tokenizer"}
     }
     assert captured["cli_passed_flags"] == {"openai.base_url": "http://override/v1"}
+
+
+# ROAD-VLA advantage distillation integration tests
+
+
+@pytest.mark.asyncio
+async def test_attach_advantage_distillation_when_enabled():
+    """Test that advantage distillation attaches when enabled."""
+    env = object.__new__(_ConcreteTeacherEnv)
+    env.config = SimpleNamespace(
+        teacher_enabled=False,
+        teacher_top_k=0,
+        advantage_distillation_enabled=True,
+        advantage_distillation_scale=0.1,
+        advantage_distillation_auto_calibrate=False,
+    )
+    env.teacher_server = None
+
+    group = {
+        "tokens": [[1, 2, 3], [4, 5]],
+        "masks": [[-100, 2, 3], [-100, 5]],
+        "scores": [1.0, 0.0],
+        "advantages": [[0.5], [-0.3]],
+        "group_overrides": None,
+    }
+    out = await TeacherDistillationEnv._attach_teacher_distillation(env, group)
+
+    # Check advantage distillation fields
+    assert out["distill_token_advantages"] is not None
+    assert out["distill_advantage_scale"] == 0.1  # Config scale when auto-calibrate disabled
+    # Masked positions should have zero advantage
+    assert out["distill_token_advantages"][0][0] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_attach_advantage_distillation_with_auto_calibrate():
+    """Test that advantage distillation auto-calibrates scale when enabled."""
+    env = object.__new__(_ConcreteTeacherEnv)
+    env.config = SimpleNamespace(
+        teacher_enabled=False,
+        teacher_top_k=0,
+        advantage_distillation_enabled=True,
+        advantage_distillation_scale=0.1,
+        advantage_distillation_auto_calibrate=True,
+    )
+    env.teacher_server = None
+
+    group = {
+        "tokens": [[1, 2, 3]],
+        "masks": [[1, 2, 3]],
+        "scores": [1.0],
+        "advantages": [[1.0, 2.0, 3.0]],
+        "group_overrides": None,
+    }
+    out = await TeacherDistillationEnv._attach_teacher_distillation(env, group)
+
+    assert out["distill_token_advantages"] is not None
+    # Scale should be calibrated (not the default 0.1)
+    assert isinstance(out["distill_advantage_scale"], float)
+
+
+@pytest.mark.asyncio
+async def test_attach_advantage_distillation_disabled_returns_none():
+    """Test that advantage distillation returns None when disabled."""
+    env = object.__new__(_ConcreteTeacherEnv)
+    env.config = SimpleNamespace(
+        teacher_enabled=False,
+        teacher_top_k=0,
+        advantage_distillation_enabled=False,
+        advantage_distillation_scale=0.1,
+        advantage_distillation_auto_calibrate=False,
+    )
+    env.teacher_server = None
+
+    group = {
+        "tokens": [[1, 2, 3]],
+        "masks": [[1, 2, 3]],
+        "scores": [1.0],
+        "advantages": [[1.0]],
+        "group_overrides": None,
+    }
+    out = await TeacherDistillationEnv._attach_teacher_distillation(env, group)
+
+    assert out["distill_token_advantages"] is None
+    assert out["distill_advantage_logits"] is None
+    assert out["distill_advantage_scale"] is None
+
+
+@pytest.mark.asyncio
+async def test_teacher_distillation_and_advantage_distillation_coexist():
+    """Test that teacher logprobs and advantage distillation can coexist."""
+    env = object.__new__(_ConcreteTeacherEnv)
+    env.config = SimpleNamespace(
+        teacher_enabled=True,
+        teacher_top_k=2,
+        advantage_distillation_enabled=True,
+        advantage_distillation_scale=0.1,
+        advantage_distillation_auto_calibrate=False,
+    )
+    env.teacher_server = _FakeTeacherServer()
+
+    group = {
+        "tokens": [[1, 2, 3]],
+        "masks": [[1, 2, 3]],
+        "scores": [1.0],
+        "advantages": [[1.0]],
+        "group_overrides": None,
+    }
+    out = await TeacherDistillationEnv._attach_teacher_distillation(env, group)
+
+    # Both teacher logprobs and advantage distillation should be present
+    assert out["distill_token_ids"] is not None
+    assert out["distill_logprobs"] is not None
+    assert out["distill_token_advantages"] is not None
+    assert out["distill_advantage_scale"] is not None
+
+
+@pytest.mark.asyncio
+async def test_advantage_distillation_with_no_advantages_field():
+    """Test that advantage distillation handles missing advantages field."""
+    env = object.__new__(_ConcreteTeacherEnv)
+    env.config = SimpleNamespace(
+        teacher_enabled=False,
+        teacher_top_k=0,
+        advantage_distillation_enabled=True,
+        advantage_distillation_scale=0.1,
+        advantage_distillation_auto_calibrate=False,
+    )
+    env.teacher_server = None
+
+    group = {
+        "tokens": [[1, 2, 3]],
+        "masks": [[1, 2, 3]],
+        "scores": [1.0],
+        "group_overrides": None,
+    }
+    out = await TeacherDistillationEnv._attach_teacher_distillation(env, group)
+
+    # When advantages field is missing, advantage distillation fields should be None
+    assert out["distill_token_advantages"] is None
+    assert out["distill_advantage_scale"] is None

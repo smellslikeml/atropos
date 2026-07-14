@@ -151,6 +151,13 @@ class ScoredData(BaseModel):
     # Shape for both: [sequence][position][top_k]
     distill_token_ids: Optional[List[List[List[int]]]] = None
     distill_logprobs: Optional[List[List[List[float]]]] = None
+    # ROAD-VLA advantage-guided self-distillation: token-level advantages and
+    # advantage-shaped teacher logits for dense token-level supervision.
+    # Shape: token_advantages is [sequence][position], advantage_logits is
+    # [sequence][position][vocab] (optional, requires student logits).
+    distill_token_advantages: Optional[List[List[float]]] = None
+    distill_advantage_logits: Optional[List[List[List[float]]]] = None
+    distill_advantage_scale: Optional[float] = None
 
     @field_validator("messages", mode="before")
     @classmethod
@@ -190,6 +197,9 @@ def _scored_data_to_dict(scored_data: ScoredData) -> Dict[str, Any]:
         "env_id": scored_data.env_id,
         "distill_token_ids": scored_data.distill_token_ids,
         "distill_logprobs": scored_data.distill_logprobs,
+        "distill_token_advantages": scored_data.distill_token_advantages,
+        "distill_advantage_logits": scored_data.distill_advantage_logits,
+        "distill_advantage_scale": scored_data.distill_advantage_scale,
     }
 
 

@@ -28,6 +28,10 @@ from ..utils.cli import (
     get_prefixed_pydantic_model,
     merge_dicts,
 )
+from ..utils.advantage_distillation import (
+    AdvantageDistillationConfig,
+    compute_advantage_distillation_payload,
+)
 from .base import BaseEnv, BaseEnvConfig, ScoredDataGroup
 from .constants import ENV_NAMESPACE, NAMESPACE_SEP, OPENAI_NAMESPACE
 from .server_handling.openai_server import resolve_openai_configs
@@ -51,6 +55,22 @@ class TeacherDistillationConfig(BaseEnvConfig):
             "teacher fetching."
         ),
     )
+    advantage_distillation_enabled: bool = Field(
+        default=False,
+        description=(
+            "Whether to enable ROAD-VLA advantage-guided self-distillation. "
+            "Computes token-level advantages and advantage-shaped teacher logits."
+        ),
+    )
+    advantage_distillation_scale: float = Field(
+        default=0.1,
+        ge=0.0,
+        description="Base scaling factor for advantage perturbation in ROAD-VLA.",
+    )
+    advantage_distillation_auto_calibrate: bool = Field(
+        default=True,
+        description="Whether to auto-calibrate advantage scale for policy proximity.",
+    )
 
 
 class TeacherDistillationEnv(BaseEnv, ABC):
@@ -60,6 +80,9 @@ class TeacherDistillationEnv(BaseEnv, ABC):
     Distillation payload shape:
       - distill_token_ids: [sequence][position][k]  (student vocab IDs)
       - distill_logprobs:  [sequence][position][k]
+      - distill_token_advantages: [sequence][position] (ROAD-VLA token-level advantages)
+      - distill_advantage_logits: [sequence][position][vocab] (advantage-shaped logits)
+      - distill_advantage_scale: float (calibrated advantage scale factor)
     """
 
     env_config_cls = TeacherDistillationConfig
@@ -375,60 +398,81 @@ class TeacherDistillationEnv(BaseEnv, ABC):
     async def _attach_teacher_distillation(
         self, group: ScoredDataGroup
     ) -> ScoredDataGroup:
-        if not self.config.teacher_enabled or self.teacher_server is None:
-            return group
+        # Initialize all distillation fields to None
+        group["distill_token_ids"] = None
+        group["distill_logprobs"] = None
+        group["distill_token_advantages"] = None
+        group["distill_advantage_logits"] = None
+        group["distill_advantage_scale"] = None
 
-        seqs = group.get("tokens", [])
-        if not seqs:
-            group["distill_token_ids"] = None
-            group["distill_logprobs"] = None
-            return group
+        # Step 1: Fetch teacher logprobs if enabled
+        if self.config.teacher_enabled and self.teacher_server is not None:
+            seqs = group.get("tokens", [])
+            if seqs:
+                group_overrides = group.get("group_overrides") or {}
+                if not group_overrides.get("skip_teacher_top_k", False):
+                    top_k = int(
+                        group_overrides.get("teacher_top_k", self.config.teacher_top_k)
+                    )
+                    if top_k > -1:
+                        tasks = [
+                            self._fetch_teacher_for_sequence(seq, top_k) for seq in seqs
+                        ]
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        group_overrides = group.get("group_overrides") or {}
-        if group_overrides.get("skip_teacher_top_k", False):
-            group["distill_token_ids"] = None
-            group["distill_logprobs"] = None
-            return group
+                        distill_token_ids: List[List[List[int]]] = []
+                        distill_logprobs: List[List[List[float]]] = []
+                        for idx, result in enumerate(results):
+                            if isinstance(result, Exception):
+                                logger.warning(
+                                    "Teacher logprob fetch failed for seq %s: %s. "
+                                    "Dropping distill payload for this group.",
+                                    idx,
+                                    result,
+                                )
+                                return group
+                            token_ids_k, logprobs_k = result
+                            if len(token_ids_k) != len(logprobs_k):
+                                logger.warning(
+                                    "Teacher prompt-topk length mismatch for seq %s "
+                                    "(%s != %s). Dropping distill payload for this group.",
+                                    idx,
+                                    len(token_ids_k),
+                                    len(logprobs_k),
+                                )
+                                return group
+                            distill_token_ids.append(token_ids_k)
+                            distill_logprobs.append(logprobs_k)
 
-        top_k = int(group_overrides.get("teacher_top_k", self.config.teacher_top_k))
-        if top_k <= -1:
-            group["distill_token_ids"] = None
-            group["distill_logprobs"] = None
-            return group
+                        group["distill_token_ids"] = distill_token_ids
+                        group["distill_logprobs"] = distill_logprobs
 
-        tasks = [self._fetch_teacher_for_sequence(seq, top_k) for seq in seqs]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Step 2: Compute advantage distillation if enabled
+        if self.config.advantage_distillation_enabled:
+            advantages = group.get("advantages")
+            masks = group.get("masks", [])
 
-        distill_token_ids: List[List[List[int]]] = []
-        distill_logprobs: List[List[List[float]]] = []
-        for idx, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.warning(
-                    "Teacher logprob fetch failed for seq %s: %s. "
-                    "Dropping distill payload for this group.",
-                    idx,
-                    result,
+            if advantages is not None and masks:
+                # Configure advantage distillation
+                adv_config = AdvantageDistillationConfig(
+                    enabled=True,
+                    advantage_scale=self.config.advantage_distillation_scale,
+                    auto_calibrate=self.config.advantage_distillation_auto_calibrate,
                 )
-                group["distill_token_ids"] = None
-                group["distill_logprobs"] = None
-                return group
-            token_ids_k, logprobs_k = result
-            if len(token_ids_k) != len(logprobs_k):
-                logger.warning(
-                    "Teacher prompt-topk length mismatch for seq %s (%s != %s). "
-                    "Dropping distill payload for this group.",
-                    idx,
-                    len(token_ids_k),
-                    len(logprobs_k),
-                )
-                group["distill_token_ids"] = None
-                group["distill_logprobs"] = None
-                return group
-            distill_token_ids.append(token_ids_k)
-            distill_logprobs.append(logprobs_k)
 
-        group["distill_token_ids"] = distill_token_ids
-        group["distill_logprobs"] = distill_logprobs
+                # Compute advantage distillation payload
+                payload = compute_advantage_distillation_payload(
+                    advantages=advantages,
+                    masks=masks,
+                    student_logits=None,  # Student logits not available at env level
+                    config=adv_config,
+                )
+
+                group["distill_token_advantages"] = payload["token_advantages"]
+                # advantage_logits requires student logits, not available here
+                group["distill_advantage_logits"] = payload["advantage_logits"]
+                group["distill_advantage_scale"] = payload["calibrated_scale"]
+
         return group
 
     async def handle_send_to_api(

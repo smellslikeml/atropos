@@ -70,6 +70,11 @@ class ScoredDataGroup(TypedDict):
     # distill_token_ids/distill_logprobs are [sequence][position][top_k]
     distill_token_ids: Optional[List[List[List[int]]]]
     distill_logprobs: Optional[List[List[List[float]]]]
+    # ROAD-VLA advantage-guided self-distillation: token-level advantages and
+    # advantage-shaped teacher logits for dense token-level supervision.
+    distill_token_advantages: Optional[List[List[float]]]
+    distill_advantage_logits: Optional[List[List[List[float]]]]
+    distill_advantage_scale: Optional[float]
 
 
 class ScoredDataItem(TypedDict):
@@ -85,6 +90,10 @@ class ScoredDataItem(TypedDict):
     # On-policy distillation (new format): parallel token ids + logprobs per position.
     distill_token_ids: Optional[List[List[int]]]
     distill_logprobs: Optional[List[List[float]]]
+    # ROAD-VLA advantage-guided self-distillation: token-level advantages.
+    distill_token_advantages: Optional[List[float]]
+    distill_advantage_logits: Optional[List[List[float]]]
+    distill_advantage_scale: Optional[float]
 
 
 class EvalHandlingEnum(Enum):
@@ -897,6 +906,9 @@ class BaseEnv(ABC):
             group.setdefault("group_overrides", None)
             group.setdefault("distill_token_ids", None)
             group.setdefault("distill_logprobs", None)
+            group.setdefault("distill_token_advantages", None)
+            group.setdefault("distill_advantage_logits", None)
+            group.setdefault("distill_advantage_scale", None)
 
             for mask in group["masks"]:
                 self.completion_lengths.append(sum(m != -100 for m in mask))
