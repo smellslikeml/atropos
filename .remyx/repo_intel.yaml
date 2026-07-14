@@ -28,7 +28,12 @@ observed_landing_zones:
     call_site_specifics: ''
     branch: escaping-the-self-confirmation-trap-an-execute-distill-verif
     timestamp: '2026-07-14T15:57:34Z'
-  last_observed: '2026-07-14T15:57:34Z'
+  - arxiv: 2606.27291v1
+    mode: ''
+    call_site_specifics: ''
+    branch: designing-reward-signals-for-portable-query-generation-a-cas
+    timestamp: '2026-07-14T16:38:18Z'
+  last_observed: '2026-07-14T16:38:18Z'
 rejected_shapes: []
 coordination_signals: []
-last_updated: '2026-07-14T16:27:39Z'
+last_updated: '2026-07-14T16:38:18Z'
