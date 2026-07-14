@@ -12,7 +12,12 @@ observed_landing_zones:
       for environments inheriting TeacherDistillationEnv (e.g., GSM8kT
     branch: road-vla-robust-online-adaptation-via-self-distillation-for-
     timestamp: '2026-07-14T14:39:17Z'
-  last_observed: '2026-07-14T14:39:17Z'
+  - arxiv: 2607.08255v1
+    mode: Mode 2 (adapted port)
+    call_site_specifics: (none)
+    branch: compete-then-collaborate-frontier-ai-teachers-build-a-verifi
+    timestamp: '2026-07-14T21:18:49Z'
+  last_observed: '2026-07-14T21:18:49Z'
 rejected_shapes:
 - shape_tag: null
   reason_code: null
@@ -21,4 +26,4 @@ rejected_shapes:
   - arxiv: 2606.17680v1
     timestamp: '2026-07-14T20:57:47Z'
 coordination_signals: []
-last_updated: '2026-07-14T20:57:47Z'
+last_updated: '2026-07-14T21:18:49Z'
