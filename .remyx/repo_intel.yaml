@@ -7,12 +7,13 @@ observed_landing_zones:
   confirmed_by:
   - arxiv: 2606.25800v1
     mode: Mode 2 (adapted port)
-    call_site_specifics: TeacherDistillationEnv._attach_teacher_distillation() in
-      atroposlib/envs/teacher_distillation_env.py, invoked from handle_send_to_api()
-      for environments inheriting TeacherDistillationEnv (e.g., GSM8kT
+    call_site_specifics: "atroposlib/envs/teacher_distillation_env.py:464 \u2014 TeacherDistillationEnv._attach_teacher_distillation()\
+      \ calls compute_advantage_distillation_payload(); that method is invoked from\
+      \ handle_send_to_api()"
     branch: road-vla-robust-online-adaptation-via-self-distillation-for-
-    timestamp: '2026-07-14T14:39:17Z'
-  last_observed: '2026-07-14T14:39:17Z'
+    timestamp: '2026-07-14T16:27:39Z'
+    pr: 13
+  last_observed: '2026-07-14T16:27:39Z'
 - path: atroposlib/envs/reward_fns/
   shape_tags:
   - unclassified
@@ -30,4 +31,4 @@ observed_landing_zones:
   last_observed: '2026-07-14T15:57:34Z'
 rejected_shapes: []
 coordination_signals: []
-last_updated: '2026-07-14T15:57:34Z'
+last_updated: '2026-07-14T16:27:39Z'
