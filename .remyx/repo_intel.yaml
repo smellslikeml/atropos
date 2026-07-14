@@ -1,0 +1,18 @@
+schema_version: 1
+fork: smellslikeml/atropos
+observed_landing_zones:
+- path: atroposlib/envs/
+  shape_tags:
+  - library-shape-public-api
+  confirmed_by:
+  - arxiv: 2606.25800v1
+    mode: Mode 2 (adapted port)
+    call_site_specifics: TeacherDistillationEnv._attach_teacher_distillation() in
+      atroposlib/envs/teacher_distillation_env.py, invoked from handle_send_to_api()
+      for environments inheriting TeacherDistillationEnv (e.g., GSM8kT
+    branch: road-vla-robust-online-adaptation-via-self-distillation-for-
+    timestamp: '2026-07-14T14:39:17Z'
+  last_observed: '2026-07-14T14:39:17Z'
+rejected_shapes: []
+coordination_signals: []
+last_updated: '2026-07-14T14:39:17Z'
