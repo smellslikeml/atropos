@@ -29,6 +29,10 @@ on:
         description: 'Optional branch name to pick, bypassing the heuristic. Useful for testing before a full week accumulates.'
         required: false
         default: ''
+      pick-override-arxiv:
+        description: 'Optional arxiv_id to pair with pick-override when the branch does not have a resolvable arxiv (SPEC.md is a runtime artifact, not persisted on the branch).'
+        required: false
+        default: ''
 
 concurrency:
   group: outrider-refiner
@@ -51,6 +55,7 @@ jobs:
           set -euo pipefail
           LOOKBACK_DAYS="${{ inputs.lookback-days || '7' }}"
           OVERRIDE="${{ inputs.pick-override || '' }}"
+          OVERRIDE_ARXIV="${{ inputs.pick-override-arxiv || '' }}"
           REPO="${GITHUB_REPOSITORY}"
 
           if [ -n "$OVERRIDE" ]; then
@@ -92,14 +97,31 @@ jobs:
             exit 0
           fi
 
-          # Pull arxiv_id from the branch's SPEC.md (deposited by the drafter's coding session)
-          ARXIV=$(gh api "repos/$REPO/contents/.remyx-recommendation/SPEC.md?ref=$BRANCH" \
-            --jq '.content' 2>/dev/null | base64 -d 2>/dev/null \
-            | grep -oE 'arxiv[_ ]?id[^0-9]*[0-9]+\.[0-9]+(v[0-9]+)?' \
-            | head -1 | grep -oE '[0-9]+\.[0-9]+(v[0-9]+)?' || echo "")
+          # Resolve arxiv_id, in order of source reliability:
+          #   1. Explicit override input (unambiguous)
+          #   2. Intel yaml's observed_landing_zones (drafter writes it on landing)
+          #   3. Empty (LLM gap analysis handles unresolved case; downstream refinement
+          #      still needs a value, so we surface the miss to the operator)
+          if [ -n "$OVERRIDE_ARXIV" ]; then
+            ARXIV="$OVERRIDE_ARXIV"
+          else
+            ARXIV=$(gh api "repos/$REPO/contents/.remyx/repo_intel.yaml?ref=main" \
+              --jq '.content' 2>/dev/null | base64 -d 2>/dev/null \
+              | awk -v b="$BRANCH" '
+                  /confirmed_by:/ {in_cb=1; next}
+                  in_cb && /arxiv:/ {arxiv=$2; gsub(/^[ ]*|[ ]*$/, "", arxiv)}
+                  in_cb && /branch:/ {branch=$2; gsub(/^[ ]*|[ ]*$/, "", branch); if (branch == b) {print arxiv; exit}}
+                  /^[^ ]/ {in_cb=0}
+                ' || echo "")
+          fi
 
           echo "→ picked branch: $BRANCH"
           echo "→ arxiv: ${ARXIV:-<unresolved>}"
+
+          if [ -z "$ARXIV" ]; then
+            echo "::error::arxiv_id could not be resolved for branch $BRANCH (checked intel yaml + override). Re-dispatch with pick-override-arxiv=<id>."
+            exit 1
+          fi
           echo "picked=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "arxiv=$ARXIV" >> "$GITHUB_OUTPUT"
 
@@ -190,6 +212,7 @@ jobs:
         run: |
           set -euo pipefail
           gh workflow run outrider.yml \
+            --repo "$GITHUB_REPOSITORY" \
             --ref main \
             -f mode=recommend \
             -f provider=anthropic \
