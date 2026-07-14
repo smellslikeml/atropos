@@ -16,7 +16,8 @@ observed_landing_zones:
   last_observed: '2026-07-14T16:27:39Z'
 - path: atroposlib/envs/reward_fns/
   shape_tags:
-  - unclassified
+  - library-shape-public-api
+  - registry-add
   confirmed_by:
   - arxiv: 2606.17680v1
     mode: ''
@@ -28,20 +29,14 @@ observed_landing_zones:
     call_site_specifics: ''
     branch: escaping-the-self-confirmation-trap-an-execute-distill-verif
     timestamp: '2026-07-14T15:57:34Z'
-  last_observed: '2026-07-14T15:57:34Z'
-- path: environments/dataset_environment/
-  shape_tags:
-  - library-shape-public-api
-  - registry-add
-  confirmed_by:
   - arxiv: 2606.27291v1
     mode: Mode 2 (adapted port)
-    call_site_specifics: CombinedReward.compute (existing, used by environments/dataset_environment/dataset_env.py
-      and others) now applies the floor override when the floor config field is set;
-      FloorGuardedReward is registere
-    pr: 15
-    timestamp: '2026-07-14T18:07:11Z'
-  last_observed: '2026-07-14T18:07:11Z'
+    call_site_specifics: Registered in the reward_fns `registry` (via `@registry.register`,
+      reachable through `registry.create("reward_floor", ...)`) and exported from
+      `atroposlib/envs/reward_fns/__init__.py`; consumable in a
+    pr: 16
+    timestamp: '2026-07-14T18:43:39Z'
+  last_observed: '2026-07-14T18:43:39Z'
 rejected_shapes: []
 coordination_signals: []
-last_updated: '2026-07-14T18:07:11Z'
+last_updated: '2026-07-14T18:43:39Z'
