@@ -34,7 +34,13 @@ observed_landing_zones:
       external consumers)
     branch: from-trainee-to-trainer-llm-designed-training-environment-fo
     timestamp: '2026-07-14T23:45:09Z'
-  last_observed: '2026-07-14T23:45:09Z'
+  - arxiv: 2407.01257v5
+    mode: Mode 2 (adapted port)
+    call_site_specifics: TeacherDistillationEnv._attach_teacher_distillation (called
+      by GSM8kTeacherDistillEnv.cli() and other TeacherDistillationEnv subclasses)
+    branch: udistil-whisper-label-free-data-filtering-for-knowledge-dist
+    timestamp: '2026-07-15T05:12:59Z'
+  last_observed: '2026-07-15T05:12:59Z'
 - path: atroposlib/utils/
   shape_tags:
   - unclassified
@@ -79,4 +85,4 @@ rejected_shapes:
   - arxiv: 2606.17680v1
     timestamp: '2026-07-14T20:57:47Z'
 coordination_signals: []
-last_updated: '2026-07-15T04:01:52Z'
+last_updated: '2026-07-15T05:12:59Z'
