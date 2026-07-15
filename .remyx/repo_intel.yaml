@@ -40,7 +40,12 @@ observed_landing_zones:
       by GSM8kTeacherDistillEnv.cli() and other TeacherDistillationEnv subclasses)
     branch: udistil-whisper-label-free-data-filtering-for-knowledge-dist
     timestamp: '2026-07-15T05:12:59Z'
-  last_observed: '2026-07-15T05:12:59Z'
+  - arxiv: 2505.19641v4
+    mode: ''
+    call_site_specifics: ''
+    branch: synlogic-synthesizing-verifiable-reasoning-data-at-scale-for
+    timestamp: '2026-07-15T11:23:46Z'
+  last_observed: '2026-07-15T11:23:46Z'
 - path: atroposlib/utils/
   shape_tags:
   - unclassified
@@ -97,4 +102,4 @@ rejected_shapes:
   - arxiv: 2603.22276v1
     timestamp: '2026-07-15T09:46:44Z'
 coordination_signals: []
-last_updated: '2026-07-15T09:46:44Z'
+last_updated: '2026-07-15T11:23:46Z'
