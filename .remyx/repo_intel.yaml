@@ -66,7 +66,12 @@ observed_landing_zones:
     call_site_specifics: ''
     branch: riemannian-preconditioned-lora-for-fine-tuning-foundation-mo
     timestamp: '2026-07-15T04:01:52Z'
-  last_observed: '2026-07-15T04:01:52Z'
+  - arxiv: 2509.07430v1
+    mode: ''
+    call_site_specifics: ''
+    branch: the-choice-of-divergence-a-neglected-key-to-mitigating-diver
+    timestamp: '2026-07-15T06:22:12Z'
+  last_observed: '2026-07-15T06:22:12Z'
 - path: atroposlib/envs/reward_fns/
   shape_tags:
   - unclassified
@@ -85,4 +90,4 @@ rejected_shapes:
   - arxiv: 2606.17680v1
     timestamp: '2026-07-14T20:57:47Z'
 coordination_signals: []
-last_updated: '2026-07-15T05:12:59Z'
+last_updated: '2026-07-15T06:22:12Z'
