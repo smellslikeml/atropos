@@ -81,7 +81,12 @@ observed_landing_zones:
     call_site_specifics: ''
     branch: designing-reward-signals-for-portable-query-generation-a-cas-v2
     timestamp: '2026-07-15T01:44:03Z'
-  last_observed: '2026-07-15T01:44:03Z'
+  - arxiv: 2509.09675v1
+    mode: ''
+    call_site_specifics: ''
+    branch: cde-curiosity-driven-exploration-for-efficient-reinforcement
+    timestamp: '2026-07-15T08:15:46Z'
+  last_observed: '2026-07-15T08:15:46Z'
 rejected_shapes:
 - shape_tag: null
   reason_code: null
@@ -90,4 +95,4 @@ rejected_shapes:
   - arxiv: 2606.17680v1
     timestamp: '2026-07-14T20:57:47Z'
 coordination_signals: []
-last_updated: '2026-07-15T06:22:12Z'
+last_updated: '2026-07-15T08:15:46Z'
