@@ -28,6 +28,7 @@ from ..utils.cli import (
     get_prefixed_pydantic_model,
     merge_dicts,
 )
+from ..utils.confidence_filter import filter_by_confidence
 from .base import BaseEnv, BaseEnvConfig, ScoredDataGroup
 from .constants import ENV_NAMESPACE, NAMESPACE_SEP, OPENAI_NAMESPACE
 from .server_handling.openai_server import resolve_openai_configs
@@ -49,6 +50,30 @@ class TeacherDistillationConfig(BaseEnvConfig):
             "Number of extra prompt logprobs to fetch beyond the selected token. "
             "Use 0 for selected-token-only prompt logprobs and <= -1 to disable "
             "teacher fetching."
+        ),
+    )
+    confidence_filter_enabled: bool = Field(
+        default=False,
+        description=(
+            "Whether to apply label-free confidence filtering to distillation data. "
+            "Filters sequences based on model confidence signals (entropy, max probability)."
+        ),
+    )
+    confidence_filter_method: str = Field(
+        default="entropy",
+        description=(
+            "Confidence metric for filtering. Options: 'entropy' (lower is better), "
+            "'max_prob' (higher is better), or 'combined' (harmonic mean)."
+        ),
+    )
+    confidence_filter_percentile: Optional[float] = Field(
+        default=75.0,
+        ge=0.0,
+        le=100.0,
+        description=(
+            "Percentile threshold for confidence filtering (0-100). Sequences with "
+            "confidence better than this percentile are kept. For 'entropy': below "
+            "percentile are kept. For 'max_prob'/'combined': above percentile are kept."
         ),
     )
 
@@ -429,6 +454,57 @@ class TeacherDistillationEnv(BaseEnv, ABC):
 
         group["distill_token_ids"] = distill_token_ids
         group["distill_logprobs"] = distill_logprobs
+
+        # Apply label-free confidence filtering if enabled
+        if self.config.confidence_filter_enabled:
+            percentile = group_overrides.get(
+                "confidence_filter_percentile",
+                self.config.confidence_filter_percentile,
+            )
+            method = group_overrides.get(
+                "confidence_filter_method",
+                self.config.confidence_filter_method,
+            )
+
+            keep_mask, confidence_scores = filter_by_confidence(
+                distill_logprobs,
+                method=method,
+                percentile=percentile,
+            )
+
+            num_kept = keep_mask.sum()
+            if num_kept == 0:
+                logger.warning(
+                    "Confidence filtering removed all sequences in group. "
+                    "Dropping distill payload."
+                )
+                group["distill_token_ids"] = None
+                group["distill_logprobs"] = None
+            elif num_kept < len(keep_mask):
+                # Filter distillation data to keep only high-confidence sequences
+                group["distill_token_ids"] = [
+                    distill_token_ids[i]
+                    for i in range(len(distill_token_ids))
+                    if keep_mask[i]
+                ]
+                group["distill_logprobs"] = [
+                    distill_logprobs[i]
+                    for i in range(len(distill_logprobs))
+                    if keep_mask[i]
+                ]
+
+                # Store filtering metadata
+                group["confidence_filter_mask"] = keep_mask.tolist()
+                group["confidence_scores"] = confidence_scores.tolist()
+
+                logger.debug(
+                    "Confidence filtering kept %s/%s sequences (method=%s, percentile=%s)",
+                    num_kept,
+                    len(keep_mask),
+                    method,
+                    percentile,
+                )
+
         return group
 
     async def handle_send_to_api(
