@@ -55,7 +55,12 @@ observed_landing_zones:
     call_site_specifics: ''
     branch: mach-mind-4-flash-technical-report
     timestamp: '2026-07-15T01:11:08Z'
-  last_observed: '2026-07-15T01:11:08Z'
+  - arxiv: 2402.02347v3
+    mode: ''
+    call_site_specifics: ''
+    branch: riemannian-preconditioned-lora-for-fine-tuning-foundation-mo
+    timestamp: '2026-07-15T04:01:52Z'
+  last_observed: '2026-07-15T04:01:52Z'
 - path: atroposlib/envs/reward_fns/
   shape_tags:
   - unclassified
@@ -74,4 +79,4 @@ rejected_shapes:
   - arxiv: 2606.17680v1
     timestamp: '2026-07-14T20:57:47Z'
 coordination_signals: []
-last_updated: '2026-07-15T01:44:03Z'
+last_updated: '2026-07-15T04:01:52Z'
