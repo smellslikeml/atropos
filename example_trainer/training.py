@@ -5,12 +5,15 @@ Contains loss computation, training step logic, and metric logging.
 
 Includes logprob alignment tracking to verify that training logprobs match
 inference logprobs at initialization (validates shared_vllm mode is working).
+
+Includes DPH-RL f-divergence loss computation for maintaining diversity
+in RLVR training (mitigating Pass@k collapse while improving Pass@1).
 """
 
 import random
 import string
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -20,6 +23,163 @@ from .config import TrainingConfig
 
 # Global storage for logprob alignment stats
 _logprob_alignment_stats: Dict[str, float] = {}
+
+
+def _compute_f_divergence_loss(
+    logp_current: torch.Tensor,
+    logp_ref: torch.Tensor,
+    advantages: torch.Tensor,
+    mask: torch.Tensor,
+    divergence_type: Literal["importance", "kl", "reverse_kl", "js", "chi_squared"],
+    clip_eps: float = 0.2,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """
+    Compute DPH-RL f-divergence loss for maintaining diversity in RLVR training.
+
+    DPH-RL (Divergence Pre-calculation for Hill-climbing RL) replaces the standard
+    importance sampling ratio with f-divergence measures, which helps maintain
+    diversity (Pass@k) while improving single-attempt accuracy (Pass@1).
+
+    Reference: "The Choice of Divergence: A Neglected Key to Mitigating Diversity
+               Collapse in Reinforcement Learning with Verifiable Reward"
+               https://arxiv.org/abs/2509.07430v1
+
+    Args:
+        logp_current: Current policy logprobs [batch, seq_len]
+        logp_ref: Reference (rollout) logprobs [batch, seq_len]
+        advantages: Advantage values [batch, seq_len]
+        mask: Mask for valid positions (1.0 for valid, 0.0 for padding)
+        divergence_type: Type of f-divergence to compute
+        clip_eps: Clipping epsilon for numerical stability
+
+    Returns:
+        Tuple of (loss tensor, metrics dict with divergence statistics)
+    """
+    # Ensure numerical stability by clamping logprobs
+    logp_current = torch.clamp(logp_current, min=-50, max=50)
+    logp_ref = torch.clamp(logp_ref, min=-50, max=50)
+
+    # Compute probability ratios (with clipping for stability)
+    log_ratio = logp_current - logp_ref
+    log_ratio = torch.clamp(log_ratio, min=-20, max=20)
+    ratio = torch.exp(log_ratio)
+    ratio = torch.clamp(ratio, min=1e-8, max=1e8)
+
+    # Compute per-token probabilities from logprobs
+    p_current = torch.exp(logp_current)
+    p_ref = torch.exp(logp_ref)
+    p_current = torch.clamp(p_current, min=1e-8, max=1.0)
+    p_ref = torch.clamp(p_ref, min=1e-8, max=1.0)
+
+    if divergence_type == "importance":
+        # Standard GRPO importance sampling (baseline)
+        # This is equivalent to the original implementation
+        divergence_weight = ratio
+
+    elif divergence_type == "kl":
+        # KL divergence: D_KL(p_ref || p_current) = sum(p_ref * log(p_ref / p_current))
+        # Measures information lost when using p_current to approximate p_ref
+        log_ratio_kl = logp_ref - logp_current  # p_ref / p_current in log space
+        divergence_weight = -torch.exp(logp_ref) * log_ratio_kl
+        # Normalize to get a multiplicative weight
+        divergence_weight = torch.exp(torch.clamp(divergence_weight, min=-10, max=10))
+
+    elif divergence_type == "reverse_kl":
+        # Reverse KL: D_KL(p_current || p_ref) = sum(p_current * log(p_current / p_ref))
+        # Measures information lost when using p_ref to approximate p_current
+        # This tends to be mode-seeking, helping maintain diversity
+        log_ratio_rkl = logp_current - logp_ref  # p_current / p_ref in log space
+        divergence_weight = -torch.exp(logp_current) * log_ratio_rkl
+        # Normalize to get a multiplicative weight
+        divergence_weight = torch.exp(torch.clamp(divergence_weight, min=-10, max=10))
+
+    elif divergence_type == "js":
+        # Jensen-Shannon divergence: symmetric and bounded
+        # JS(P, Q) = 0.5 * KL(P || M) + 0.5 * KL(Q || M) where M = 0.5*(P + Q)
+        m = 0.5 * (p_current + p_ref)
+        m = torch.clamp(m, min=1e-8, max=1.0)
+
+        # KL(p_current || m)
+        kl_pm = p_current * (logp_current - torch.log(m))
+        # KL(p_ref || m)
+        kl_qm = p_ref * (logp_ref - torch.log(m))
+
+        js_div = 0.5 * (kl_pm + kl_qm)
+        # Convert to weight (negative because we want to minimize divergence)
+        divergence_weight = torch.exp(-torch.clamp(js_div, min=-10, max=10))
+
+    elif divergence_type == "chi_squared":
+        # Chi-squared divergence: sum((p - q)^2 / q)
+        # Measures squared difference normalized by reference distribution
+        diff_sq = (p_current - p_ref) ** 2
+        chi_sq = diff_sq / torch.clamp(p_ref, min=1e-8)
+        # Per-token chi-squared, then average over vocabulary dimension
+        # For scalar logprobs, we use the ratio form
+        divergence_weight = 1.0 / (1.0 + torch.clamp(chi_sq, min=0, max=100))
+
+    else:
+        raise ValueError(f"Unknown divergence_type: {divergence_type}")
+
+    # Apply clipping for stability (similar to PPO clipping)
+    clipped_weight = torch.clamp(divergence_weight, 1.0 - clip_eps, 1.0 + clip_eps)
+
+    # Compute loss using divergence-weighted advantages
+    # For positive advantages, use the weight that increases likelihood
+    # For negative advantages, use the weight that decreases likelihood
+    surr1 = divergence_weight * advantages
+    surr2 = clipped_weight * advantages
+
+    # Pessimistic bound: min for positive advantages, max for negative
+    policy_loss_per_token = -torch.where(
+        advantages >= 0,
+        torch.min(surr1, surr2),
+        torch.max(surr1, surr2),
+    )
+
+    # Compute mask sum for normalization
+    mask_sum = mask.sum(dim=-1).clamp_min(1e-8)
+
+    # Average over tokens, then over batch
+    policy_loss = (policy_loss_per_token * mask).sum(dim=-1) / mask_sum
+    policy_loss = policy_loss.mean()
+
+    # Compute additional metrics for monitoring
+    with torch.no_grad():
+        # Mean divergence weight for monitoring
+        mean_div_weight = (divergence_weight * mask).sum() / mask.sum()
+
+        # Fraction of tokens where weight was clipped
+        clipped_fraction = (
+            (divergence_weight < 1.0 - clip_eps) | (divergence_weight > 1.0 + clip_eps)
+        ).float()
+        clipped_fraction = (clipped_fraction * mask).sum() / mask.sum()
+
+        # Compute raw divergence values for logging
+        if divergence_type == "kl":
+            # KL divergence value
+            raw_div = (p_ref * (logp_ref - logp_current) * mask).sum() / mask.sum()
+        elif divergence_type == "reverse_kl":
+            raw_div = (p_current * (logp_current - logp_ref) * mask).sum() / mask.sum()
+        elif divergence_type == "js":
+            m = 0.5 * (p_current + p_ref)
+            m = torch.clamp(m, min=1e-8)
+            kl_pm = p_current * (logp_current - torch.log(m))
+            kl_qm = p_ref * (logp_ref - torch.log(m))
+            raw_div = 0.5 * (kl_pm + kl_qm)
+            raw_div = (raw_div * mask).sum() / mask.sum()
+        elif divergence_type == "chi_squared":
+            diff_sq = (p_current - p_ref) ** 2
+            raw_div = (diff_sq / torch.clamp(p_ref, min=1e-8) * mask).sum() / mask.sum()
+        else:  # importance
+            raw_div = torch.tensor(0.0, device=logp_current.device)
+
+    metrics = {
+        "mean_divergence_weight": mean_div_weight,
+        "clipped_fraction": clipped_fraction,
+        "raw_divergence": raw_div.item() if hasattr(raw_div, "item") else raw_div,
+    }
+
+    return policy_loss, metrics
 
 
 def setup_wandb(config: TrainingConfig) -> bool:
@@ -70,6 +230,9 @@ def compute_grpo_loss(
     gradient_accumulation_steps: int,
     inference_logprobs: Optional[torch.Tensor] = None,
     clip_eps: float = 0.2,
+    divergence_type: Literal[
+        "importance", "kl", "reverse_kl", "js", "chi_squared"
+    ] = "importance",
 ) -> Tuple[torch.Tensor, dict]:
     """
     Compute GRPO (Group Relative Policy Optimization) loss for a single micro-batch.
@@ -77,6 +240,7 @@ def compute_grpo_loss(
     This implements GRPO/PPO-style clipped ratio training with:
     - Importance sampling ratio from current logprobs vs rollout inference_logprobs
     - PPO-style clipping to prevent large updates
+    - Optional f-divergence loss (DPH-RL) for maintaining diversity
 
     The loss encourages the model to:
     - Increase probability for tokens with positive advantages
@@ -91,6 +255,8 @@ def compute_grpo_loss(
         gradient_accumulation_steps: Number of accumulation steps (for scaling)
         inference_logprobs: Rollout logprobs from inference, aligned with labels [batch, seq_len]
         clip_eps: PPO clipping epsilon. Clips ratio to [1-eps, 1+eps]
+        divergence_type: Type of divergence to use. 'importance' for standard GRPO,
+                        or 'kl', 'reverse_kl', 'js', 'chi_squared' for DPH-RL f-divergence.
 
     Returns:
         Tuple of (loss tensor, metrics dict)
@@ -163,51 +329,91 @@ def compute_grpo_loss(
                     f"    [DEBUG] Logprob gap: ref={ref_at_generated:.3f}, train={train_at_generated:.3f}"
                 )
 
-        # Compute importance ratio from current training logprobs and rollout inference_logprobs.
-        # ratio = exp(current_logprob - rollout_inference_logprob)
-        log_ratio = logp_per_token - ref_logprobs
-        ratio = torch.exp(log_ratio)
+        # === DPH-RL or Standard GRPO Loss Computation ===
+        if divergence_type == "importance":
+            # Standard GRPO importance sampling
+            # ratio = exp(current_logprob - rollout_inference_logprob)
+            log_ratio = logp_per_token - ref_logprobs
+            ratio = torch.exp(log_ratio)
 
-        # PPO-style clipping
-        clipped_ratio = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
+            # PPO-style clipping
+            clipped_ratio = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
 
-        # Surrogate objectives
-        surr1 = ratio * adv_expanded
-        surr2 = clipped_ratio * adv_expanded
+            # Surrogate objectives
+            surr1 = ratio * adv_expanded
+            surr2 = clipped_ratio * adv_expanded
 
-        # Pessimistic bound: min for positive advantages, max for negative
-        # This is equivalent to: -min(ratio * A, clipped_ratio * A) when A > 0
-        # -max(ratio * A, clipped_ratio * A) when A < 0
-        policy_loss_per_token = -torch.where(
-            adv_expanded >= 0,
-            torch.min(surr1, surr2),
-            torch.max(surr1, surr2),
-        )
+            # Pessimistic bound: min for positive advantages, max for negative
+            # This is equivalent to: -min(ratio * A, clipped_ratio * A) when A > 0
+            # -max(ratio * A, clipped_ratio * A) when A < 0
+            policy_loss_per_token = -torch.where(
+                adv_expanded >= 0,
+                torch.min(surr1, surr2),
+                torch.max(surr1, surr2),
+            )
 
-        # Average over tokens, then over batch
-        policy_loss = ((policy_loss_per_token * mask).sum(dim=-1) / mask_sum).mean()
+            # Average over tokens, then over batch
+            policy_loss = ((policy_loss_per_token * mask).sum(dim=-1) / mask_sum).mean()
 
-        total_loss = policy_loss / gradient_accumulation_steps
+            total_loss = policy_loss / gradient_accumulation_steps
 
-        # Compute metrics for logging
-        with torch.no_grad():
-            # Fraction of tokens where ratio was clipped
-            clipped_fraction = (
-                (ratio < 1.0 - clip_eps) | (ratio > 1.0 + clip_eps)
-            ).float()
-            clipped_fraction = (clipped_fraction * mask).sum() / mask.sum()
+            # Compute metrics for logging
+            with torch.no_grad():
+                # Fraction of tokens where ratio was clipped
+                clipped_fraction = (
+                    (ratio < 1.0 - clip_eps) | (ratio > 1.0 + clip_eps)
+                ).float()
+                clipped_fraction = (clipped_fraction * mask).sum() / mask.sum()
 
-            # Mean ratio for monitoring
-            mean_ratio = (ratio * mask).sum() / mask.sum()
+                # Mean ratio for monitoring
+                mean_ratio = (ratio * mask).sum() / mask.sum()
 
-            # For backward compatibility: collect training logprobs
-            raw_logp_per_token = -F.cross_entropy(
-                outputs.logits.view(-1, outputs.logits.size(-1)),
-                labels.view(-1),
-                reduction="none",
-                ignore_index=-100,
-            ).view(labels.shape)
-            training_logprobs_flat = raw_logp_per_token[mask.bool()].detach()
+                # For divergence tracking (standard mode)
+                mean_divergence_weight = mean_ratio
+                raw_divergence = 0.0
+
+                # For backward compatibility: collect training logprobs
+                raw_logp_per_token = -F.cross_entropy(
+                    outputs.logits.view(-1, outputs.logits.size(-1)),
+                    labels.view(-1),
+                    reduction="none",
+                    ignore_index=-100,
+                ).view(labels.shape)
+                training_logprobs_flat = raw_logp_per_token[mask.bool()].detach()
+
+        else:
+            # DPH-RL: Use f-divergence loss for better diversity preservation
+            policy_loss, div_metrics = _compute_f_divergence_loss(
+                logp_current=logp_per_token,
+                logp_ref=ref_logprobs,
+                advantages=adv_expanded,
+                mask=mask,
+                divergence_type=divergence_type,
+                clip_eps=clip_eps,
+            )
+
+            total_loss = policy_loss / gradient_accumulation_steps
+
+            # Extract metrics from f-divergence computation
+            with torch.no_grad():
+                clipped_fraction = div_metrics["clipped_fraction"]
+                mean_divergence_weight = div_metrics["mean_divergence_weight"]
+                raw_divergence = div_metrics["raw_divergence"]
+
+                # For backward compatibility, also compute standard ratio metrics
+                log_ratio = logp_per_token - ref_logprobs
+                ratio = torch.exp(log_ratio)
+                mean_ratio = (ratio * mask).sum() / mask.sum()
+
+                # For backward compatibility: collect training logprobs
+                raw_logp_per_token = -F.cross_entropy(
+                    outputs.logits.view(-1, outputs.logits.size(-1)),
+                    labels.view(-1),
+                    reduction="none",
+                    ignore_index=-100,
+                ).view(labels.shape)
+                training_logprobs_flat = raw_logp_per_token[mask.bool()].detach()
+
     else:
         # Fail loudly
         raise ValueError(
@@ -249,6 +455,14 @@ def compute_grpo_loss(
             if torch.is_tensor(clipped_fraction)
             else clipped_fraction
         ),
+        # DPH-RL divergence metrics (present for all modes, but meaningful for f-divergence)
+        "mean_divergence_weight": (
+            mean_divergence_weight.item()
+            if torch.is_tensor(mean_divergence_weight)
+            else mean_divergence_weight
+        ),
+        "raw_divergence": raw_divergence,
+        "divergence_type": divergence_type,
         # Token-level alignment metrics (key for verifying weight sharing)
         "logprob_diff_mean": logprob_diff_mean,
         "logprob_diff_abs_mean": logprob_diff_abs_mean,
@@ -299,6 +513,8 @@ def run_training_step(
     total_neg = 0.0
     total_mean_ratio = 0.0
     total_clipped_fraction = 0.0
+    total_divergence_weight = 0.0
+    total_raw_divergence = 0.0
     total_logprob_diff_mean = 0.0
     total_logprob_diff_abs_mean = 0.0
     total_logprob_diff_max = 0.0
@@ -308,6 +524,7 @@ def run_training_step(
 
     # Get GRPO hyperparameters from config
     clip_eps = getattr(config, "clip_eps", 0.2)
+    divergence_type = getattr(config, "divergence_type", "importance")
 
     # Apply linear warmup to optimizer LR for early-step stability.
     warmup_steps = max(0, int(getattr(config, "warmup_steps", 0)))
@@ -345,6 +562,7 @@ def run_training_step(
             config.gradient_accumulation_steps,
             inference_logprobs=inf_logprobs,
             clip_eps=clip_eps,
+            divergence_type=divergence_type,
         )
 
         loss.backward()
@@ -357,6 +575,10 @@ def run_training_step(
         # Accumulate GRPO-specific metrics
         total_mean_ratio += metrics.get("mean_ratio", 1.0)
         total_clipped_fraction += metrics.get("clipped_fraction", 0.0)
+
+        # Accumulate DPH-RL divergence metrics
+        total_divergence_weight += metrics.get("mean_divergence_weight", 1.0)
+        total_raw_divergence += metrics.get("raw_divergence", 0.0)
 
         # Accumulate token-level alignment metrics
         total_logprob_diff_mean += metrics.get("logprob_diff_mean", 0.0)
@@ -399,6 +621,10 @@ def run_training_step(
         # GRPO-specific metrics (averaged over batches)
         "mean_ratio": total_mean_ratio / num_batches,
         "clipped_fraction": total_clipped_fraction / num_batches,
+        # DPH-RL divergence metrics (averaged over batches)
+        "mean_divergence_weight": total_divergence_weight / num_batches,
+        "raw_divergence": total_raw_divergence / num_batches,
+        "divergence_type": divergence_type,
     }
 
     # Compute logprob alignment stats for monitoring
@@ -471,7 +697,16 @@ def log_metrics(
     mean_ratio = metrics.get("mean_ratio", 1.0)
     clipped_frac = metrics.get("clipped_fraction", 0)
 
-    print(f"    GRPO: ratio={mean_ratio:.3f}, clipped={clipped_frac*100:.1f}%")
+    # DPH-RL divergence metrics (if present)
+    divergence_type = metrics.get("divergence_type", "importance")
+    if divergence_type != "importance":
+        div_weight = metrics.get("mean_divergence_weight", 1.0)
+        raw_div = metrics.get("raw_divergence", 0.0)
+        print(
+            f"    GRPO [{divergence_type}]: ratio={mean_ratio:.3f}, clipped={clipped_frac*100:.1f}%, div_weight={div_weight:.3f}, raw_div={raw_div:.4f}"
+        )
+    else:
+        print(f"    GRPO: ratio={mean_ratio:.3f}, clipped={clipped_frac*100:.1f}%")
 
     # Advantage distribution
     if "pos_count" in metrics or "neg_count" in metrics:
@@ -494,7 +729,15 @@ def log_metrics(
             # GRPO-specific metrics
             "grpo/mean_ratio": mean_ratio,
             "grpo/clipped_fraction": clipped_frac,
+            # DPH-RL divergence metrics
+            "grpo/divergence_type": divergence_type,
         }
+        # Add divergence metrics if using f-divergence
+        if divergence_type != "importance":
+            log_dict["grpo/mean_divergence_weight"] = metrics.get(
+                "mean_divergence_weight", 1.0
+            )
+            log_dict["grpo/raw_divergence"] = metrics.get("raw_divergence", 0.0)
         # Add timing metrics if present
         for key in [
             "step_time",

@@ -69,6 +69,21 @@ class TrainingConfig(BaseModel):
             "Prevents large policy updates that could destabilize training."
         ),
     )
+    divergence_type: Literal["importance", "kl", "reverse_kl", "js", "chi_squared"] = (
+        Field(
+            "importance",
+            description=(
+                "Type of divergence to use for GRPO loss computation. "
+                "'importance': Standard GRPO with importance sampling ratio (default). "
+                "'kl': KL divergence D_KL(pi_old || pi_current). "
+                "'reverse_kl': Reverse KL divergence D_KL(pi_current || pi_old). "
+                "'js': Jensen-Shannon divergence (symmetric). "
+                "'chi_squared': Chi-squared divergence. "
+                "Using f-divergence variants (kl, reverse_kl, js, chi_squared) implements "
+                "DPH-RL, which can help maintain diversity (Pass@k) during RLVR training."
+            ),
+        )
+    )
     # === Device & Storage ===
     device: str = Field(
         "cuda" if torch.cuda.is_available() else "cpu", description="Device to train on"
