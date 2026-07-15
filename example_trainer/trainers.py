@@ -20,6 +20,7 @@ import torch
 from torch.optim import AdamW
 
 from .api import check_atropos_api, register_trainer
+from .riemannian_lora import create_riemannian_lora_optimizer
 
 logger = logging.getLogger(__name__)
 
@@ -445,7 +446,13 @@ def train_lora(config: TrainingConfig):
 
     # Only optimize LoRA parameters
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = create_optimizer_for_params(trainable_params, config)
+
+    # Create optimizer with optional Riemannian preconditioning
+    if config.riemannian_preconditioning:
+        print("[2/3] Creating optimizer with Riemannian preconditioning...")
+        optimizer = create_riemannian_lora_optimizer(model, config)
+    else:
+        optimizer = create_optimizer_for_params(trainable_params, config)
 
     print(f"[3/3] Starting training for {config.training_steps} steps")
     print("-" * 60)
@@ -654,7 +661,13 @@ def train_lora_restart(config: TrainingConfig):
 
     # Only optimize LoRA parameters
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = create_optimizer_for_params(trainable_params, config)
+
+    # Create optimizer with optional Riemannian preconditioning
+    if config.riemannian_preconditioning:
+        print("[1/4] Creating optimizer with Riemannian preconditioning...")
+        optimizer = create_riemannian_lora_optimizer(model, config)
+    else:
+        optimizer = create_optimizer_for_params(trainable_params, config)
 
     os.makedirs(config.save_path, exist_ok=True)
 

@@ -173,6 +173,29 @@ class TrainingConfig(BaseModel):
             "If None, applies LoRA to all matching layers."
         ),
     )
+    riemannian_preconditioning: bool = Field(
+        False,
+        description=(
+            "Enable Riemannian preconditioning for LoRA optimization. "
+            "Adds an r×r preconditioner to LoRA A and B matrices, improving "
+            "convergence and robustness to hyperparameters with minimal overhead. "
+            "Based on 'Riemannian Preconditioned LoRA for Fine-Tuning Foundation Models'."
+        ),
+    )
+    riemannian_damping: float = Field(
+        1e-6,
+        description=(
+            "Damping factor added to diagonal of preconditioner matrices "
+            "for numerical stability when using Riemannian preconditioning."
+        ),
+    )
+    riemannian_frequency: int = Field(
+        1,
+        description=(
+            "Apply Riemannian preconditioning every N steps. "
+            "Set to 1 to apply at every step (recommended)."
+        ),
+    )
 
     # === Single-Copy Mode Configuration ===
     single_copy: bool = Field(
