@@ -18,6 +18,17 @@ import wandb
 
 from .config import TrainingConfig
 
+# Optional multi-teacher scheduling
+try:
+    from atroposlib.utils.multi_teacher_scheduler import (
+        MultiTeacherScheduler,
+        TeacherConfig,
+        SchedulerConfig,
+    )
+    MULTI_TEACHER_AVAILABLE = True
+except ImportError:
+    MULTI_TEACHER_AVAILABLE = False
+
 # Global storage for logprob alignment stats
 _logprob_alignment_stats: Dict[str, float] = {}
 
@@ -132,7 +143,8 @@ def compute_grpo_loss(
             logp_per_token.device, logp_per_token.dtype
         )
 
-        # NOTE: inference_logprobs uses 1.0 for masked (prompt) positions, actual negative values for generated
+        # NOTE: inference_logprobs uses 1.0 for masked (prompt) positions,
+        # actual negative values for generated
         with torch.no_grad():
             # Only look at generated positions (where mask == 1)
             ref_at_generated = (ref_logprobs * mask).sum() / mask.sum()
@@ -160,7 +172,8 @@ def compute_grpo_loss(
                 )
             elif abs(ref_at_generated - train_at_generated) > 2.0:
                 print(
-                    f"    [DEBUG] Logprob gap: ref={ref_at_generated:.3f}, train={train_at_generated:.3f}"
+                    f"    [DEBUG] Logprob gap: ref={ref_at_generated:.3f}, "
+                    f"train={train_at_generated:.3f}"
                 )
 
         # Compute importance ratio from current training logprobs and rollout inference_logprobs.
@@ -596,3 +609,108 @@ def finalize_training(
             wandb.finish()
     elif use_wandb:
         wandb.finish()
+
+
+# === Multi-Teacher Scheduler Integration ===
+
+
+def create_multi_teacher_scheduler(config: TrainingConfig) -> Optional["MultiTeacherScheduler"]:
+    """
+    Create a multi-teacher scheduler from training configuration.
+
+    Args:
+        config: Training configuration with multi-teacher settings
+
+    Returns:
+        MultiTeacherScheduler instance or None if multi-teacher is disabled
+    """
+    if not MULTI_TEACHER_AVAILABLE:
+        print("[Multi-Teacher] Multi-teacher scheduler not available (import failed)")
+        return None
+
+    if not config.enable_multi_teacher:
+        return None
+
+    if not config.teacher_endpoints:
+        print("[Multi-Teacher] No teacher endpoints configured, disabling multi-teacher")
+        return None
+
+    # Create teacher configs from endpoint list
+    teacher_configs = []
+    for i, endpoint in enumerate(config.teacher_endpoints):
+        name = f"teacher_{i}"
+        teacher_configs.append(
+            TeacherConfig(
+                name=name,
+                endpoint=endpoint,
+            )
+        )
+
+    # Create scheduler config
+    scheduler_config = SchedulerConfig(
+        selection_strategy=config.teacher_selection_strategy,
+        epsilon=config.teacher_epsilon,
+        load_balance_factor=config.teacher_load_balance,
+    )
+
+    scheduler = MultiTeacherScheduler(teacher_configs, scheduler_config)
+    print(f"[Multi-Teacher] Scheduler initialized with {len(teacher_configs)} teachers")
+    print(f"[Multi-Teacher] Selection strategy: {config.teacher_selection_strategy}")
+
+    return scheduler
+
+
+def record_teacher_metrics(
+    scheduler: Optional["MultiTeacherScheduler"],
+    metrics: dict,
+    selected_teacher: Optional[str] = None,
+) -> None:
+    """
+    Record training metrics to the multi-teacher scheduler.
+
+    Args:
+        scheduler: Multi-teacher scheduler instance
+        metrics: Training metrics dict (loss, advantages, etc.)
+        selected_teacher: Name of the teacher that was used
+    """
+    if scheduler is None or selected_teacher is None:
+        return
+
+    # Compute reward from metrics (using negative loss as reward)
+    # Higher reward = better performance
+    loss = metrics.get("loss", 0.0)
+    reward = -loss  # Negative loss is reward
+
+    # Compute success flag (loss is finite and not NaN)
+    success = isinstance(loss, (int, float)) and not (loss != loss)  # NaN check
+
+    scheduler.record_result(
+        teacher_name=selected_teacher,
+        reward=reward,
+        success=success,
+    )
+
+
+def log_teacher_selection(
+    scheduler: Optional["MultiTeacherScheduler"],
+    selected_teacher: Optional[str] = None,
+    step: int = 0,
+) -> None:
+    """
+    Log teacher selection statistics.
+
+    Args:
+        scheduler: Multi-teacher scheduler instance
+        selected_teacher: Name of the selected teacher
+        step: Current training step
+    """
+    if scheduler is None or selected_teacher is None:
+        return
+
+    stats = scheduler.get_teacher_stats(selected_teacher)
+    print(
+        f"    [Teacher: {selected_teacher}] "
+        f"success_rate: {stats.get('success_rate', 0):.2%}, "
+        f"avg_reward: {stats.get('avg_reward', 0):.3f}, "
+        f"calls: {stats.get('call_count', 0)}"
+    )

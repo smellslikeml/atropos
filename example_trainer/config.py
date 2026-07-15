@@ -119,9 +119,12 @@ class TrainingConfig(BaseModel):
             "none",
             description=(
                 "How to synchronize weights with inference server. "
-                "'shared_vllm': attach to vLLM's shared memory tensors and update in-place. "
-                "'lora_only': keep base model frozen, train/swap LoRA adapters via HTTP (slow, needs --enforce-eager). "
-                "'lora_restart': LoRA training with vLLM restarts (fast, CUDA graphs enabled). "
+                "'shared_vllm': attach to vLLM's shared memory tensors and "
+                "update in-place. "
+                "'lora_only': keep base model frozen, train/swap LoRA adapters "
+                "via HTTP (slow, needs --enforce-eager). "
+                "'lora_restart': LoRA training with vLLM restarts (fast, CUDA "
+                "graphs enabled). "
                 "'none': legacy mode, restart vLLM with new checkpoint files."
             ),
         )
@@ -218,5 +221,46 @@ class TrainingConfig(BaseModel):
         description=(
             "URL of the Atropos API server (environment server). "
             "Default is http://localhost:8000. Change for concurrent tests."
+        ),
+    )
+
+    # === Multi-Teacher Scheduling Configuration ===
+    enable_multi_teacher: bool = Field(
+        False,
+        description=(
+            "Enable dynamic multi-teacher scheduling for distillation. "
+            "When enabled, uses multiple teacher endpoints and selects "
+            "the best teacher based on performance metrics."
+        ),
+    )
+    teacher_endpoints: List[str] = Field(
+        [],
+        description=(
+            "List of teacher endpoint URLs for multi-teacher scheduling. "
+            "Only used when enable_multi_teacher=True. "
+            "Example: ['http://localhost:8001', 'http://localhost:8002']"
+        ),
+    )
+    teacher_selection_strategy: Literal[
+        "performance", "round_robin", "random", "epsilon_greedy"
+    ] = Field(
+        "performance",
+        description=(
+            "Strategy for selecting teachers in multi-teacher mode. "
+            "'performance': Select based on recent performance metrics. "
+            "'round_robin': Cycle through teachers evenly. "
+            "'random': Select randomly. "
+            "'epsilon_greedy': Mostly performance, with random exploration."
+        ),
+    )
+    teacher_epsilon: float = Field(
+        0.1,
+        description="Exploration rate for epsilon-greedy teacher selection (0.0-1.0).",
+    )
+    teacher_load_balance: float = Field(
+        0.2,
+        description=(
+            "Load balancing factor for performance-based selection (0.0-1.0). "
+            "Higher values favor more even distribution across teachers."
         ),
     )
