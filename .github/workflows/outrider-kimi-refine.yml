@@ -241,3 +241,9 @@ jobs:
           # probe — the fork has recent PRs from the earlier two-tier
           # trial that would otherwise trigger skipped_open_artifact.
           rate-limit-days: '0'
+          # Kimi kimi-k3 has thinking enabled by default and runs slower
+          # per turn than Anthropic Opus. Previous atropos retry timed out
+          # at 1500s in the coding session. Bumping to 60min gives comfortable
+          # margin for a real coding pass. Bumps cost proportionally to
+          # wall time (~$3-5 range expected vs $2.14 on the tavily probe).
+          claude-timeout: '3600'
