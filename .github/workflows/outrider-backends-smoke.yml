@@ -16,7 +16,7 @@ name: Outrider backends-registry smoke
 on:
   workflow_dispatch:
     inputs:
-      pin-method:
+      search-method:
         description: 'Optional arxiv_id or method query (skip selection pass).'
         required: false
         default: ''
@@ -49,6 +49,6 @@ jobs:
           publish: pr
           provider: moonshot
           model: kimi-k3
-          pin-method: ${{ inputs.pin-method }}
+          search-method: ${{ inputs.search-method }}
           rate-limit-days: '0'
           claude-timeout: '3600'
