@@ -1,30 +1,49 @@
 """
-Curiosity-Driven Exploration (CDE) reward function for RLVR.
+Curiosity-Driven Exploration (CDE) exploration bonus for RLVR.
 
-Based on: CDE: Curiosity-Driven Exploration for Efficient Reinforcement Learning
-in Large Language Models (https://arxiv.org/abs/2509.09675v1)
+Adapted from: CDE: Curiosity-Driven Exploration for Efficient Reinforcement
+Learning in Large Language Models (https://arxiv.org/abs/2509.09675v1)
 
-CDE addresses the problem of poor exploration in Reinforcement Learning with
-Verifiable Rewards (RLVR), which leads to premature convergence and entropy collapse.
-This reward function provides intrinsic curiosity signals to encourage diverse
-exploration during RL training.
+CDE addresses poor exploration in Reinforcement Learning with Verifiable
+Rewards (RLVR) — premature convergence and entropy collapse — by adding an
+intrinsic curiosity bonus to the verifiable reward:
 
-The implementation combines three complementary curiosity signals:
-1. **Actor novelty**: Measures how novel/completed outputs are compared to recent history
-2. **Entropy bonus**: Encourages high-entropy distributions to prevent mode collapse
-3. **Critic surprise** (optional): Uses value prediction variance if available
+    r(x, y) = r_verifiable(x, y) + alpha * B_actor(x, y) + beta * B_critic(x, y)
 
-This is an adapted port (Mode 2) that captures the core CDE mechanism while using
-simpler, parameter-free components suitable for the Atropos framework:
-- Uses n-gram diversity and token entropy instead of learned embeddings
-- Accepts optional value predictions via kwargs but doesn't require them
-- Stateless design that works across distributed training setups
+This module implements the paper's two curiosity signals:
+
+1. **Actor-wise bonus**: the perplexity of the generated response under the
+   actor policy, log PPL(y) = -(1/T) * sum_t log pi(y_t | y_<t, x). Higher
+   perplexity means the policy was less certain about its own output, so the
+   bonus inherently penalizes overconfident (low-perplexity) errors and
+   promotes diversity among correct responses. When per-token logprobs are
+   supplied via the ``logprobs`` kwarg this signal is computed exactly. When
+   they are absent (reward functions run server-side, often without
+   logprobs), it is approximated by the mean surprisal of the response under
+   an add-k-smoothed bigram model estimated from recent completions — a
+   parameter-free proxy for sequence perplexity.
+
+2. **Critic-wise bonus**: the standard deviation of value estimates across
+   the heads of a multi-head critic, supplied per completion via the
+   ``values`` kwarg as a list of K head estimates. The paper connects this
+   epistemic-uncertainty signal to the count-based exploration bonus
+   ~ 1/sqrt(N(s)). A single scalar value has zero head variance and yields
+   no bonus — value magnitude is not a curiosity signal.
+
+Substitution notes (Mode 2 adapted port): the actor's token probabilities
+are replaced by the count-based bigram proxy only when logprobs are
+unavailable; the multi-head critic itself lives in the trainer, so per-head
+estimates are passed in by the caller rather than computed here. The
+verifiable reward and group-relative normalization (GRPO/PPO) remain in
+their existing Atropos components — this function contributes only the
+exploration bonus, composed with verifiable rewards via CombinedReward.
 """
 
 import logging
+import math
 import re
 from collections import Counter
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, List, Optional, Set
 
 from .registry import registry
 from .reward_function import RewardFunction
@@ -35,28 +54,32 @@ logger = logging.getLogger(__name__)
 @registry.register
 class CDEReward(RewardFunction):
     """
-    Curiosity-Driven Exploration reward function for RLVR.
+    Curiosity-Driven Exploration bonus for RLVR.
 
-    Combines actor novelty, entropy bonus, and optional critic surprise signals
-    to encourage diverse exploration and prevent premature convergence in RLVR.
+    Combines the paper's actor-wise perplexity bonus and critic-wise
+    multi-head value-variance bonus:
+
+        bonus = actor_weight * B_actor + critic_weight * B_critic
+
+    Both components are normalized to [0, 1]; the weights act as the paper's
+    alpha/beta coefficients on top of the verifiable reward.
 
     Components:
-        - novelty_score: Measures output diversity via n-gram analysis
-        - entropy_bonus: Encourages high-entropy token distributions
-        - surprise_score: Optional value-based curiosity signal
-
-    The reward is computed as:
-        curiosity = w_novelty * novelty + w_entropy * entropy + w_surprise * surprise
+        - B_actor: normalized log-perplexity of the response (exact when
+          token logprobs are provided, bigram-proxy otherwise)
+        - B_critic: normalized standard deviation across multi-head value
+          estimates (0 when fewer than two head estimates are supplied)
     """
 
     def __init__(
         self,
-        novelty_weight: float = 0.5,
-        entropy_weight: float = 0.3,
-        surprise_weight: float = 0.2,
-        ngram_sizes: Optional[List[int]] = None,
-        entropy_window_size: int = 50,
+        actor_weight: float = 1.0,
+        critic_weight: float = 0.5,
+        max_log_perplexity: float = 10.0,
+        max_value_std: float = 1.0,
+        smoothing: float = 1.0,
         min_tokens: int = 10,
+        history_size: int = 100,
         weight: float = 1.0,
         **kwargs,
     ):
@@ -64,307 +87,234 @@ class CDEReward(RewardFunction):
         Initialize the CDE reward function.
 
         Args:
-            novelty_weight: Weight for the novelty/diversity component (default: 0.5)
-            entropy_weight: Weight for the entropy bonus component (default: 0.3)
-            surprise_weight: Weight for the value-based surprise component (default: 0.2)
-            ngram_sizes: N-gram sizes for diversity analysis (default: [2, 3, 4])
-            entropy_window_size: Window size for local entropy computation (default: 50)
-            min_tokens: Minimum tokens required for meaningful analysis (default: 3)
+            actor_weight: Coefficient for the actor perplexity bonus
+                (the paper's alpha, default: 1.0)
+            critic_weight: Coefficient for the critic variance bonus
+                (the paper's beta, default: 0.5)
+            max_log_perplexity: Log-perplexity clipped and normalized against
+                this scale (default: 10.0)
+            max_value_std: Value-head standard deviation clipped and
+                normalized against this scale (default: 1.0)
+            smoothing: Add-k smoothing for the bigram perplexity proxy
+                (default: 1.0)
+            min_tokens: Minimum token count for a completion to be scored
+                (default: 10)
+            history_size: Maximum completions kept in the proxy's sliding
+                corpus window (default: 100)
             weight: Overall weight for this reward function (default: 1.0)
             **kwargs: Additional configuration
         """
         super().__init__(weight=weight, **kwargs)
-        self.novelty_weight = novelty_weight
-        self.entropy_weight = entropy_weight
-        self.surprise_weight = surprise_weight
-        self.ngram_sizes = ngram_sizes or [2, 3, 4]
-        self.entropy_window_size = entropy_window_size
+        self.actor_weight = actor_weight
+        self.critic_weight = critic_weight
+        self.max_log_perplexity = max_log_perplexity
+        self.max_value_std = max_value_std
+        self.smoothing = smoothing
         self.min_tokens = min_tokens
+        self._history_size = history_size
 
-        # Track recent completions for novelty comparison (circular buffer)
-        self._history_size = 100
+        # Sliding-window corpus backing the bigram perplexity proxy.
         self._completion_history: List[str] = []
+        self._unigram_counts: Counter = Counter()
+        self._bigram_counts: Counter = Counter()
+        self._vocab: Set[str] = set()
+        self._total_unigrams: int = 0
 
     def compute(self, completions: List[Any], **kwargs) -> List[float]:
         """
-        Compute CDE curiosity rewards for the given completions.
+        Compute CDE exploration bonuses for the given completions.
 
         Args:
             completions: List of completions to evaluate
             **kwargs: Additional context, may include:
-                - values: List of value predictions for critic surprise
-                - logprobs: List of logprobability tensors for entropy calculation
-                - reference_texts: Reference texts for cross-sample novelty
+                - logprobs: Per-completion token logprobs of the generated
+                  response under the actor policy (exact actor bonus)
+                - values: Per-completion list of multi-head critic value
+                  estimates (critic bonus)
 
         Returns:
-            List of curiosity scores (higher = more novel/diverse)
+            List of exploration bonuses (higher = more curious/uncertain)
         """
-        # Extract content from different possible formats
-        completion_contents = [
-            self.get_content(completion) for completion in completions
-        ]
+        contents = [self.get_content(completion) for completion in completions]
+        logprobs = kwargs.get("logprobs")
+        values = kwargs.get("values")
 
-        # Extract optional value predictions if available
-        values = kwargs.get("values", None)
-        logprobs = kwargs.get("logprobs", None)
-
-        curiosity_rewards = []
-
-        for idx, content in enumerate(completion_contents):
-            # Skip empty completions
-            if not content or len(content.strip()) < self.min_tokens:
-                curiosity_rewards.append(0.0)
+        bonuses = []
+        for idx, content in enumerate(contents):
+            tokens = self._tokenize(content)
+            if len(tokens) < self.min_tokens:
+                bonuses.append(0.0)
                 continue
 
-            # Compute the three curiosity components
-            novelty_score = self._compute_novelty_score(content)
-            entropy_score = self._compute_entropy_bonus(
-                content, logprobs[idx] if logprobs and idx < len(logprobs) else None
+            token_logprobs = (
+                logprobs[idx] if logprobs is not None and idx < len(logprobs) else None
             )
-            surprise_score = self._compute_surprise_score(
-                idx, values[idx] if values and idx < len(values) else None
+            head_values = (
+                values[idx] if values is not None and idx < len(values) else None
             )
 
-            # Combine weighted components
-            curiosity = (
-                self.novelty_weight * novelty_score
-                + self.entropy_weight * entropy_score
-                + self.surprise_weight * surprise_score
+            actor_bonus = self._actor_bonus(tokens, token_logprobs)
+            critic_bonus = self._critic_bonus(head_values)
+
+            bonuses.append(
+                self.actor_weight * actor_bonus + self.critic_weight * critic_bonus
             )
 
-            curiosity_rewards.append(curiosity)
+        # Update the proxy corpus after scoring so bonuses reflect surprise
+        # relative to completions generated *before* this batch.
+        self._update_history(contents)
 
-        # Update history with current batch for future novelty comparisons
-        self._update_history(completion_contents)
+        if bonuses:
+            logger.debug(
+                f"CDE bonuses: min={min(bonuses):.3f}, max={max(bonuses):.3f}, "
+                f"mean={sum(bonuses) / len(bonuses):.3f}"
+            )
 
-        logger.debug(
-            f"CDE rewards: min={min(curiosity_rewards):.3f}, "
-            f"max={max(curiosity_rewards):.3f}, mean={sum(curiosity_rewards)/len(curiosity_rewards):.3f}"
-        )
+        return bonuses
 
-        return curiosity_rewards
-
-    def _compute_novelty_score(self, content: str) -> float:
+    def _actor_bonus(self, tokens: List[str], logprobs: Optional[Any]) -> float:
         """
-        Compute novelty score based on n-gram diversity.
+        Actor-wise curiosity bonus: normalized log-perplexity of the response.
 
-        Higher scores indicate more diverse/unique content compared to recent history.
-
-        Args:
-            content: The completion text to analyze
+        Uses exact token logprobs when available; falls back to the bigram
+        surprisal proxy otherwise.
 
         Returns:
-            Novelty score between 0 and 1
+            Bonus in [0, 1]; higher = higher perplexity = more exploratory.
         """
-        # Tokenize the content
-        tokens = self._tokenize(content)
-
-        if len(tokens) < self.min_tokens:
-            return 0.0
-
-        # Extract n-grams from current content
-        current_ngrams = set()
-        for n in self.ngram_sizes:
-            if len(tokens) >= n:
-                for i in range(len(tokens) - n + 1):
-                    ngram = tuple(tokens[i : i + n])
-                    current_ngrams.add(ngram)
-
-        if not current_ngrams:
-            return 0.0
-
-        # Compare against history
-        if not self._completion_history:
-            # First batch - reward intrinsic diversity
-            return self._compute_intrinsic_diversity(content)
-
-        # Compute overlap with recent history
-        history_overlap = 0
-        for hist_content in self._completion_history[-20:]:  # Compare with last 20
-            hist_tokens = self._tokenize(hist_content)
-            hist_ngrams = set()
-            for n in self.ngram_sizes:
-                if len(hist_tokens) >= n:
-                    for i in range(len(hist_tokens) - n + 1):
-                        ngram = tuple(hist_tokens[i : i + n])
-                        hist_ngrams.add(ngram)
-
-            # Jaccard similarity
-            if current_ngrams and hist_ngrams:
-                overlap = len(current_ngrams & hist_ngrams) / len(
-                    current_ngrams | hist_ngrams
-                )
-                history_overlap = max(history_overlap, overlap)
-
-        # Novelty is inversely related to overlap
-        novelty = 1.0 - history_overlap
-        return max(0.0, novelty)
-
-    def _compute_intrinsic_diversity(self, content: str) -> float:
-        """
-        Compute intrinsic diversity of content without history comparison.
-
-        Uses n-gram uniqueness ratio within the content itself.
-
-        Args:
-            content: The completion text to analyze
-
-        Returns:
-            Diversity score between 0 and 1
-        """
-        tokens = self._tokenize(content)
-
-        if len(tokens) < self.min_tokens:
-            return 0.0
-
-        # Compute unique n-gram ratio
-        unique_ratios = []
-        for n in self.ngram_sizes:
-            if len(tokens) >= n:
-                ngrams = [
-                    tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1)
-                ]
-                if ngrams:
-                    unique_ratio = len(set(ngrams)) / len(ngrams)
-                    unique_ratios.append(unique_ratio)
-
-        return sum(unique_ratios) / len(unique_ratios) if unique_ratios else 0.0
-
-    def _compute_entropy_bonus(
-        self, content: str, logprobs: Optional[Any] = None
-    ) -> float:
-        """
-        Compute entropy bonus to encourage exploration.
-
-        If logprobs are provided, uses actual token entropy.
-        Otherwise, estimates entropy from lexical diversity.
-
-        Args:
-            content: The completion text to analyze
-            logprobs: Optional logprobability tensor/array
-
-        Returns:
-            Entropy bonus between 0 and 1
-        """
+        log_ppl = None
         if logprobs is not None:
-            # Try to use actual logprobs for accurate entropy
-            try:
-                # Handle different logprobs formats
-                if hasattr(logprobs, "entropy"):
-                    # Some formats provide entropy directly
-                    return min(1.0, float(logprobs.entropy()))
-                elif hasattr(logprobs, "__len__"):
-                    # Array-like: compute entropy from distribution
-                    import numpy as np
+            log_ppl = self._log_perplexity_from_logprobs(logprobs)
+        if log_ppl is None:
+            log_ppl = self._proxy_log_perplexity(tokens)
+        clipped = min(max(log_ppl, 0.0), self.max_log_perplexity)
+        return clipped / self.max_log_perplexity
 
-                    probs = np.exp(np.array(logprobs))
-                    probs = probs[probs > 0]  # Avoid log(0)
-                    if len(probs) > 0:
-                        entropy = -np.sum(probs * np.log(probs))
-                        # Normalize by log of vocab size (approximate)
-                        return min(1.0, entropy / 10.0)  # 10 is approximate log(vocab)
-            except Exception as e:
-                logger.debug(f"Could not compute entropy from logprobs: {e}")
+    @staticmethod
+    def _log_perplexity_from_logprobs(logprobs: Any) -> Optional[float]:
+        """
+        Exact actor signal: log PPL(y) = -(1/T) * sum_t log pi(y_t | y_<t, x).
 
-        # Fallback: estimate entropy from lexical diversity
-        tokens = self._tokenize(content)
+        Accepts any per-token sequence of logprobabilities (list, numpy
+        array, torch tensor). Returns None if not interpretable.
+        """
+        try:
+            vals = [float(lp) for lp in logprobs]
+        except (TypeError, ValueError):
+            return None
+        if not vals:
+            return None
+        return -sum(vals) / len(vals)
 
-        if len(tokens) < self.min_tokens:
+    def _proxy_log_perplexity(self, tokens: List[str]) -> float:
+        """
+        Parameter-free perplexity proxy: mean surprisal under an
+        add-k-smoothed bigram model estimated from recent completions.
+
+        Responses whose token transitions are rare in recent history score
+        high surprisal (novel/diverse); responses repeating recent history
+        score low. With an empty history the model is uniform over the
+        completion's own vocabulary, so surprisal reduces to log |vocab|.
+        """
+        vocab_size = max(1, len(self._vocab | set(tokens)))
+        k = self.smoothing
+        total_surprisal = 0.0
+        prev = None
+        for tok in tokens:
+            if prev is None:
+                # Unigram backoff for the first token.
+                count = self._unigram_counts.get(tok, 0)
+                denom = self._total_unigrams + k * vocab_size
+            else:
+                count = self._bigram_counts.get((prev, tok), 0)
+                denom = self._unigram_counts.get(prev, 0) + k * vocab_size
+            total_surprisal += -math.log((count + k) / denom)
+            prev = tok
+        return total_surprisal / len(tokens)
+
+    def _critic_bonus(self, value_estimates: Optional[Any]) -> float:
+        """
+        Critic-wise curiosity bonus: standard deviation of value estimates
+        across the heads of a multi-head critic, normalized to [0, 1].
+
+        The paper ties this epistemic-uncertainty signal to the count-based
+        exploration bonus ~ 1/sqrt(N(s)). A single scalar estimate has zero
+        head variance and yields no bonus.
+        """
+        if value_estimates is None:
             return 0.0
-
-        # Use type-token ratio as entropy proxy
-        unique_tokens = set(tokens)
-        ttr = len(unique_tokens) / len(tokens) if tokens else 0.0
-
-        # Adjust for content length (TTR decreases with length)
-        # Standardized TTR approximation
-        adjusted_ttr = ttr * (1 + len(tokens) / (len(tokens) + 100))
-
-        return min(1.0, adjusted_ttr)
-
-    def _compute_surprise_score(
-        self, idx: int, value: Optional[float] = None
-    ) -> float:
-        """
-        Compute surprise score based on value prediction variance.
-
-        Higher surprise indicates the model encountered unexpected states.
-
-        Args:
-            idx: Index of the current completion (for position-based surprise)
-            value: Optional value prediction from critic
-
-        Returns:
-            Surprise score between 0 and 1
-        """
-        if value is not None:
-            # If we have value predictions, compute surprise based on value magnitude
-            try:
-                val = float(value)
-                # Normalize by assuming typical value range [-10, 10]
-                # Surprise is higher for extreme values
-                surprise = min(1.0, abs(val) / 10.0)
-                return surprise
-            except (TypeError, ValueError):
-                pass
-
-        # Fallback: small baseline curiosity for all completions
-        # This ensures some exploration signal even without values
-        return 0.1
+        try:
+            vals = [float(v) for v in value_estimates]
+        except (TypeError, ValueError):
+            # A lone scalar carries no multi-head uncertainty signal.
+            return 0.0
+        if len(vals) < 2:
+            return 0.0
+        mean = sum(vals) / len(vals)
+        variance = sum((v - mean) ** 2 for v in vals) / len(vals)
+        std = math.sqrt(variance)
+        return min(std, self.max_value_std) / self.max_value_std
 
     def _tokenize(self, text: str) -> List[str]:
-        """
-        Simple word-level tokenization.
+        """Simple word-level tokenization."""
+        return re.findall(r"\b\w+\b", text.lower())
 
-        Args:
-            text: The text to tokenize
+    def _update_history(self, contents: List[str]) -> None:
+        """Add the current batch to the proxy corpus (sliding window)."""
+        for content in contents:
+            tokens = self._tokenize(content)
+            if len(tokens) < self.min_tokens:
+                continue
+            self._completion_history.append(content)
+            self._add_to_model(tokens)
+            while len(self._completion_history) > self._history_size:
+                evicted = self._completion_history.pop(0)
+                self._remove_from_model(self._tokenize(evicted))
 
-        Returns:
-            List of tokens
-        """
-        # Simple regex-based tokenization
-        tokens = re.findall(r"\b\w+\b", text.lower())
-        return tokens
+    def _add_to_model(self, tokens: List[str]) -> None:
+        prev = None
+        for tok in tokens:
+            self._unigram_counts[tok] += 1
+            self._total_unigrams += 1
+            self._vocab.add(tok)
+            if prev is not None:
+                self._bigram_counts[(prev, tok)] += 1
+            prev = tok
 
-    def _update_history(self, completion_contents: List[str]) -> None:
-        """
-        Update the completion history with current batch.
-
-        Args:
-            completion_contents: List of completion texts from current batch
-        """
-        for content in completion_contents:
-            if content and len(content.strip()) >= self.min_tokens:
-                self._completion_history.append(content)
-                # Keep history bounded
-                if len(self._completion_history) > self._history_size:
-                    self._completion_history.pop(0)
+    def _remove_from_model(self, tokens: List[str]) -> None:
+        prev = None
+        for tok in tokens:
+            self._unigram_counts[tok] -= 1
+            self._total_unigrams -= 1
+            if self._unigram_counts[tok] <= 0:
+                del self._unigram_counts[tok]
+                self._vocab.discard(tok)
+            if prev is not None:
+                key = (prev, tok)
+                self._bigram_counts[key] -= 1
+                if self._bigram_counts[key] <= 0:
+                    del self._bigram_counts[key]
+            prev = tok
 
 
 # Legacy function for backward compatibility
 def cde_reward(
     completions: List[Any],
-    novelty_weight: float = 0.5,
-    entropy_weight: float = 0.3,
-    surprise_weight: float = 0.2,
+    actor_weight: float = 1.0,
+    critic_weight: float = 0.5,
     **kwargs,
 ) -> List[float]:
     """
-    Legacy function wrapper for CDE reward.
+    Legacy function wrapper for the CDE exploration bonus.
 
     Args:
         completions: List of completions to evaluate
-        novelty_weight: Weight for novelty component (default: 0.5)
-        entropy_weight: Weight for entropy component (default: 0.3)
-        surprise_weight: Weight for surprise component (default: 0.2)
-        **kwargs: Additional parameters including values, logprobs
+        actor_weight: Coefficient for the actor perplexity bonus
+        critic_weight: Coefficient for the critic variance bonus
+        **kwargs: Additional parameters including logprobs, values
 
     Returns:
-        List of curiosity scores (higher = more novel/diverse)
+        List of exploration bonuses (higher = more curious/uncertain)
     """
-    reward_fn = CDEReward(
-        novelty_weight=novelty_weight,
-        entropy_weight=entropy_weight,
-        surprise_weight=surprise_weight,
-    )
+    reward_fn = CDEReward(actor_weight=actor_weight, critic_weight=critic_weight)
     return reward_fn.compute(completions, **kwargs)

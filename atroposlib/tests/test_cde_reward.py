@@ -1,10 +1,16 @@
 """
 Tests for the CDE (Curiosity-Driven Exploration) reward function.
+
+These tests pin the paper's two curiosity signals (arXiv:2509.09675v1):
+  - actor-wise: perplexity over the actor's own generated response
+  - critic-wise: variance of value estimates across a multi-head critic
 """
 
 import pytest
 
 from atroposlib.envs.reward_fns.registry import registry
+
+LONG_TEXT = "this is a sufficiently long completion with plenty of distinct tokens"
 
 
 class TestCDEReward:
@@ -27,16 +33,10 @@ class TestCDEReward:
         assert cde_reward.name == "cdereward"
 
     def test_create_with_custom_weights(self):
-        """Test creating CDE reward with custom weights."""
-        cde_reward = registry.create(
-            "cde",
-            novelty_weight=0.7,
-            entropy_weight=0.2,
-            surprise_weight=0.1,
-        )
-        assert cde_reward.novelty_weight == 0.7
-        assert cde_reward.entropy_weight == 0.2
-        assert cde_reward.surprise_weight == 0.1
+        """Test creating CDE reward with custom component weights."""
+        cde_reward = registry.create("cde", actor_weight=0.7, critic_weight=0.2)
+        assert cde_reward.actor_weight == 0.7
+        assert cde_reward.critic_weight == 0.2
 
     def test_compute_simple_completions(self):
         """Test CDE reward on simple string completions."""
@@ -69,8 +69,8 @@ class TestCDEReward:
         rewards = cde_reward.compute(completions)
 
         assert len(rewards) == len(completions)
-        # Empty/short completions should get low curiosity scores
-        assert all(r <= 0.5 for r in rewards)
+        # Completions below min_tokens get no exploration bonus
+        assert all(r == 0.0 for r in rewards)
 
     def test_weight_application(self):
         """Test that weight is properly applied."""
@@ -86,79 +86,91 @@ class TestCDEReward:
         for w, r in zip(weighted_rewards, raw_rewards):
             assert abs(w - 2.0 * r) < 1e-6
 
-    def test_novelty_detection(self):
-        """Test that novel content gets higher curiosity scores."""
-        cde_reward = registry.create("cde", novelty_weight=1.0, entropy_weight=0.0, surprise_weight=0.0)
+    # --- Actor-wise bonus: perplexity over the actor's own response ---
 
-        # First batch - all novel (use longer content)
-        first_batch = [
-            "This is a unique piece of content with many words here",
-            "Another completely different sentence with lots of words",
-            "Third unique paragraph containing many distinct words here"
-        ]
-        first_rewards = cde_reward.compute(first_batch)
+    def test_actor_bonus_exact_from_logprobs(self):
+        """Actor bonus equals normalized log-perplexity of the response."""
+        cde_reward = registry.create("cde", actor_weight=1.0, critic_weight=0.0)
 
-        # Second batch with similar content
-        second_batch = [
-            "This is a unique piece of content with many words here",
-            "Some new and different content for variety in testing",
-            "Yet another distinct piece of writing for our novelty test"
-        ]
-        second_rewards = cde_reward.compute(second_batch)
+        # Mean logprob -1.0 -> log PPL = 1.0 -> bonus = 1.0 / 10.0
+        rewards = cde_reward.compute([LONG_TEXT], logprobs=[[-1.0] * 8])
+        assert rewards[0] == pytest.approx(0.1)
 
-        # The repeated content should have lower novelty
-        assert second_rewards[0] < first_rewards[0], "Repeated content should have lower novelty"
+    def test_actor_bonus_penalizes_overconfidence(self):
+        """Paper's key property: overconfident (low-perplexity) outputs get
+        little exploration bonus; uncertain (high-perplexity) ones get more."""
+        cde_reward = registry.create("cde", actor_weight=1.0, critic_weight=0.0)
 
-    def test_entropy_bonus(self):
-        """Test entropy bonus computation."""
-        # High diversity content vs low diversity content
+        confident = cde_reward.compute([LONG_TEXT], logprobs=[[-0.01] * 8])[0]
+        uncertain = cde_reward.compute([LONG_TEXT], logprobs=[[-4.0] * 8])[0]
+
+        assert uncertain > confident
+        assert confident == pytest.approx(0.001)
+
+    def test_actor_bonus_proxy_novel_vs_repeated(self):
+        """Proxy path (no logprobs): content repeated from history has low
+        surprisal under the bigram model; novel content scores higher."""
         cde_reward = registry.create(
-            "cde",
-            novelty_weight=0.0,
-            entropy_weight=1.0,
-            surprise_weight=0.0,
+            "cde", actor_weight=1.0, critic_weight=0.0, min_tokens=3
         )
+        seed = "alpha beta gamma delta epsilon zeta eta theta iota kappa"
 
-        # Use longer content for proper analysis
-        high_diversity = [
-            "The quick brown fox jumps over lazy dogs and then runs away quickly",
-            "Many unique words exist here in this particular sentence that we wrote"
-        ]
-        low_diversity = [
-            "the the the the the the the the the the the the the the the the",
-            "same same same same same same same same same same same same same"
-        ]
+        cde_reward.compute([seed])  # seed the proxy corpus
+        repeated = cde_reward.compute([seed])[0]
+        novel = cde_reward.compute(
+            ["completely unrelated tokens absent from the corpus so far"]
+        )[0]
 
-        high_rewards = cde_reward.compute(high_diversity)
-        low_rewards = cde_reward.compute(low_diversity)
+        assert repeated < novel, "Repeated content should have lower curiosity"
 
-        # High diversity should get higher entropy bonus
-        assert high_rewards[0] > low_rewards[0], "High diversity should get higher entropy"
+    def test_actor_bonus_proxy_cold_start_diversity(self):
+        """Empty history: surprisal reduces to log |vocab|, so lexically
+        diverse text scores above repetitive text (diversity promotion)."""
+        diverse_reward = registry.create(
+            "cde", actor_weight=1.0, critic_weight=0.0, min_tokens=3
+        ).compute(["one two three four five six seven eight nine ten"])[0]
+        repetitive_reward = registry.create(
+            "cde", actor_weight=1.0, critic_weight=0.0, min_tokens=3
+        ).compute(["same same same same same same same same same same"])[0]
 
-    def test_with_value_predictions(self):
-        """Test CDE reward with value predictions."""
-        cde_reward = registry.create(
-            "cde",
-            novelty_weight=0.0,
-            entropy_weight=0.0,
-            surprise_weight=1.0,
-        )
+        assert diverse_reward > repetitive_reward
 
-        # Use content long enough to pass min_tokens threshold
-        completions = ["This is a longer test completion with many words"]
+    # --- Critic-wise bonus: multi-head value variance ---
 
-        # Higher value = higher surprise (normalized by 10)
-        rewards = cde_reward.compute(completions, values=[5.0])
-        assert rewards[0] > 0, "Positive value should produce surprise"
-        # Value 5.0 should give surprise of 0.5
-        assert abs(rewards[0] - 0.5) < 0.01, f"Expected 0.5, got {rewards[0]}"
+    def test_critic_bonus_multi_head_variance(self):
+        """Critic bonus grows with the spread of multi-head value estimates."""
+        cde_reward = registry.create("cde", actor_weight=0.0, critic_weight=1.0)
+
+        uncertain = cde_reward.compute([LONG_TEXT], values=[[1.0, 3.0, 5.0]])[0]
+        certain = cde_reward.compute([LONG_TEXT], values=[[2.9, 3.0, 3.1]])[0]
+
+        assert uncertain > certain
+        # std of [2.9, 3.0, 3.1] = sqrt(0.02 / 3)
+        assert certain == pytest.approx((0.02 / 3) ** 0.5)
+
+    def test_critic_bonus_scalar_value_has_no_signal(self):
+        """Paper: curiosity is the *variance across heads*. A single scalar
+        value estimate carries no epistemic signal, and neither does its
+        magnitude — value level is not curiosity."""
+        cde_reward = registry.create("cde", actor_weight=0.0, critic_weight=1.0)
+
+        assert cde_reward.compute([LONG_TEXT], values=[5.0])[0] == 0.0
+        assert cde_reward.compute([LONG_TEXT])[0] == 0.0
+
+    def test_min_tokens_guard(self):
+        """Completions below the token threshold get no bonus."""
+        cde_reward = registry.create("cde", min_tokens=10)
+
+        rewards = cde_reward.compute(["too short"], logprobs=[[-1.0, -1.0]])
+
+        assert rewards == [0.0]
 
     def test_combined_reward_integration(self):
         """Test that CDE works with CombinedReward."""
         combined = registry.create(
             "combined",
             rewards=[
-                {"type": "cde", "params": {"novelty_weight": 0.5}},
+                {"type": "cde", "params": {"actor_weight": 0.5}},
                 {"type": "format"},
             ],
         )
@@ -169,12 +181,14 @@ class TestCDEReward:
         assert len(rewards) == len(completions)
 
     def test_history_tracking(self):
-        """Test that completion history is tracked for novelty."""
+        """Test that the proxy corpus is tracked and bounded."""
         cde_reward = registry.create("cde")
 
         # Add multiple batches to build history
         for i in range(5):
-            cde_reward.compute([f"Batch {i} content"])
+            cde_reward.compute(
+                [f"Batch {i} content with enough tokens to pass the guard here"]
+            )
 
         # History should be maintained
         assert len(cde_reward._completion_history) > 0
@@ -191,16 +205,6 @@ class TestCDEReward:
 
         assert len(rewards) == len(completions)
         assert all(isinstance(r, float) for r in rewards)
-
-    def test_custom_ngram_sizes(self):
-        """Test CDE with custom n-gram sizes."""
-        cde_reward = registry.create("cde", ngram_sizes=[2, 5, 7])
-        assert cde_reward.ngram_sizes == [2, 5, 7]
-
-        completions = ["This is a longer test completion with many words"]
-        rewards = cde_reward.compute(completions)
-
-        assert len(rewards) == len(completions)
 
     def test_call_with_kwargs(self):
         """Test calling CDE with various kwargs."""
