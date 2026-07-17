@@ -1,0 +1,54 @@
+name: Outrider backends-registry smoke
+
+# Smoke test for the new `provider` action input from
+# remyxai/outrider@salma/backends-registry. Validates:
+#   1. Configure step fires when provider != ''
+#   2. MOONSHOT_API_KEY inheritance from the caller's env block reaches
+#      the composite action's bash env correctly
+#   3. Mutual-exclusion fix works — passing every backend's secret in
+#      the env block doesn't cause Claude Code to prefer x-api-key
+#      (which Moonshot would 401 on)
+#   4. Full recommend path runs end-to-end via Kimi kimi-k3
+#
+# Manual-only; does not schedule. Delete this file after the smoke
+# validates and the branch merges to main.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pin-method:
+        description: 'Optional arxiv_id or method query (skip selection pass).'
+        required: false
+        default: ''
+
+concurrency:
+  group: outrider-backends-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: remyxai/outrider@salma/backends-registry
+        env:
+          REMYX_API_KEY: ${{ secrets.REMYX_API_KEY }}
+          # Every backend's secret intentionally passed together — the
+          # action's Configure step is expected to pick MOONSHOT_API_KEY
+          # (provider=moonshot) and clear the others so Claude Code
+          # doesn't prefer x-api-key against Moonshot.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
+        with:
+          interest-id: f17d1f4c-a9cd-4c8f-bd57-8b076ff6f2ed
+          mode: recommend
+          publish: pr
+          provider: moonshot
+          model: kimi-k3
+          pin-method: ${{ inputs.pin-method }}
+          rate-limit-days: '0'
+          claude-timeout: '3600'
