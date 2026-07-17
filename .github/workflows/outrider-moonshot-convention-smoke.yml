@@ -1,0 +1,45 @@
+name: Outrider Moonshot convention smoke
+
+# Runs the convention pass (mode=convention) against a specific PR
+# using Kimi K3. The convention pass rewrites the PR body to match the
+# target repo's PR-body template + house style extracted from recent
+# merged PRs. Standalone from the recommend flow — dispatches on an
+# already-open PR.
+#
+# Uses provider: moonshot action input from remyxai/outrider@v1.7.29+
+# (single-line auth wiring, no fork-side Configure step).
+#
+# Manual-only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: 'PR number to run convention pass against.'
+        required: true
+
+concurrency:
+  group: outrider-moonshot-convention-smoke
+  cancel-in-progress: false
+
+jobs:
+  convention:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: remyxai/outrider@v1
+        env:
+          REMYX_API_KEY: ${{ secrets.REMYX_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
+        with:
+          interest-id: f17d1f4c-a9cd-4c8f-bd57-8b076ff6f2ed
+          mode: convention
+          pr-number: ${{ inputs.pr-number }}
+          provider: moonshot
+          model: kimi-k3
+          claude-timeout: '3600'
