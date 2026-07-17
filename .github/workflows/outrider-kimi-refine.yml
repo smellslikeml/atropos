@@ -102,6 +102,8 @@ jobs:
           fi
 
           # Resolve arxiv_id from override input or intel yaml
+          # (regex extract to avoid awk-field-splitting quirks — earlier
+          # `$2` after split grabbed the literal "arxiv:" instead of the id)
           if [ -n "$OVERRIDE_ARXIV" ]; then
             ARXIV="$OVERRIDE_ARXIV"
           else
@@ -109,8 +111,12 @@ jobs:
               --jq '.content' 2>/dev/null | base64 -d 2>/dev/null \
               | awk -v b="$BRANCH" '
                   /confirmed_by:/ {in_cb=1; next}
-                  in_cb && /arxiv:/ {arxiv=$2; gsub(/^[ ]*|[ ]*$/, "", arxiv)}
-                  in_cb && /branch:/ {branch=$2; gsub(/^[ ]*|[ ]*$/, "", branch); if (branch == b) {print arxiv; exit}}
+                  in_cb {
+                    if (match($0, /arxiv:[ ]*([^ ]+)/, m)) { arxiv=m[1] }
+                    if (match($0, /branch:[ ]*([^ ]+)/, n)) {
+                      if (n[1] == b) { print arxiv; exit }
+                    }
+                  }
                   /^[^ ]/ {in_cb=0}
                 ' || echo "")
           fi
@@ -231,3 +237,7 @@ jobs:
           staged-synthesis: 'true'
           publish: pr
           model-base-url: 'https://api.moonshot.ai/anthropic'
+          # Bypass the 7-day rate-limit-days guard for this one-off Kimi
+          # probe — the fork has recent PRs from the earlier two-tier
+          # trial that would otherwise trigger skipped_open_artifact.
+          rate-limit-days: '0'
